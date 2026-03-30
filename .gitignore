@@ -4,20 +4,21 @@
 
 # Build artifacts
 build/
+dist/
 
 # go-librespot source (use pre-built binary from releases)
 go-librespot/
 go-librespot_linux_arm64.tar.gz
 
 # Binaries in package (download separately)
-package/SideB/go-librespot
-package/SideB/sideb
-package/SideB/yt-dlp
-package/SideB/ffmpeg-full
+package/SideB.pak/go-librespot
+package/SideB.pak/sideb
+package/SideB.pak/yt-dlp
+package/SideB.pak/ffmpeg-full
 
 # Large resource files (see README for download instructions)
-package/SideB/resources/font.ttf
-package/SideB/resources/ca-certificates.crt
+package/SideB.pak/resources/font.ttf
+package/SideB.pak/resources/ca-certificates.crt
 
 # Build artifacts
 *.exe

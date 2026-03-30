@@ -652,6 +652,11 @@ pub fn render_loop(
                         None => false,
                     };
                     if exit_active {
+                        // Clear the status bar area (620–690), preserve "EXIT [B]" hint at 736
+                        drawing::fill_rect(
+                            back_buf, 0, 620,
+                            SCREEN_W as i32, 70, 0, 0, 0, 255,
+                        );
                         let msg = "Press B again to exit";
                         let msg_w = fonts.measure_text(msg, fonts.scale_large);
                         let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
@@ -1016,6 +1021,7 @@ mod tests {
         {
             let mut st = state.lock().unwrap();
             st.connected = true;
+            st.mode = AppMode::Spotify;
         }
 
         let mut rs = empty_render_state();

@@ -1,6 +1,6 @@
 # SideB
 
-Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with a native fullscreen cassette-tape UI.
+Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with offline favorites, local playback, and a native fullscreen cassette-tape UI.
 
 ## Features
 
@@ -46,7 +46,7 @@ This software is provided as-is for educational and personal use. It is not inte
 ## Requirements
 
 - TrimUI Brick
-- [CrossMix OS](https://github.com/cizia64/CrossMix-OS) `1.1.1+`
+- NextUI, Stock OS, or [CrossMix OS](https://github.com/cizia64/CrossMix-OS) `1.1.1+`
 - Spotify Premium account
 - Wi-Fi on the same network as your Spotify client (for streaming mode)
 
@@ -69,39 +69,79 @@ This software is provided as-is for educational and personal use. It is not inte
 git clone https://github.com/CharlexH/SideB.git
 cd SideB/spotify-ui-rs
 cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB/sideb
+cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 ```
 
 ### Required runtime files (not tracked in git)
 
-- `package/SideB/go-librespot` — Spotify Connect backend binary
-- `package/SideB/ffmpeg-full` — static ffmpeg with MP3 encoder support
-- `package/SideB/yt-dlp` — YouTube audio downloader (aarch64 binary)
-- `package/SideB/resources/ca-certificates.crt` — TLS root certificates
-- `package/SideB/resources/font.ttf` — UI font
+- `package/SideB.pak/go-librespot` — Spotify Connect backend binary
+- `package/SideB.pak/ffmpeg-full` — static ffmpeg with MP3 encoder support
+- `package/SideB.pak/yt-dlp` — YouTube audio downloader (aarch64 binary)
+- `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
+- `package/SideB.pak/resources/font_mono.ttf` — UI font
+
+## Package Releases
+
+Build all release archives:
+
+```bash
+./scripts/package.sh
+```
+
+This produces:
+
+- `dist/SideB-<version>-nextui.zip`
+- `dist/SideB-<version>-stock.zip`
+- `dist/SideB-<version>-crossmix.zip`
+
+Each archive already contains the correct SD-card root layout:
+
+- `nextui`: `Tools/tg5040/SideB.pak/...`
+- `stock`: `Apps/SideB/...`
+- `crossmix`: `Apps/SideB/...`
+
+Supported in this release:
+
+- `NextUI` — validated on device
+- `Stock` — package layout and launcher verified
+- `CrossMix` — package layout and launcher verified
 
 ## Deploy
 
-Copy `package/SideB` to the SD card:
+Manual install paths:
 
 ```text
-/mnt/SDCARD/Apps/SideB/
+NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/
+Stock    -> /mnt/SDCARD/Apps/SideB/
+CrossMix -> /mnt/SDCARD/Apps/SideB/
 ```
 
 Launch **SideB** from the TrimUI app menu, then select **TrimUI Brick** from Spotify Connect on another device.
+
+## GitHub Release
+
+Public releases attach three installable archives:
+
+- `SideB-<version>-nextui.zip`
+- `SideB-<version>-stock.zip`
+- `SideB-<version>-crossmix.zip`
+
+The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
 ## Repo Layout
 
 ```text
 spotify-ui-rs/                  Rust UI source
-package/SideB/                  Deployable app folder for the SD card
-package/SideB/data/             Runtime config and persisted state (favorites, music)
-package/SideB/resources/        UI images, icons, and fonts
+package/SideB.pak/              Local runtime staging folder and source assets
+package/SideB.pak/data/         Runtime config copied into release packages
+package/SideB.pak/resources/    UI images, icons, and fonts
+packaging/                      Platform wrappers and release metadata
+scripts/package.sh              Multi-platform release packager
 ```
 
 ## Configuration
 
-Main config: [`package/SideB/data/config.yml`](package/SideB/data/config.yml)
+Main config: [`package/SideB.pak/data/config.yml`](package/SideB.pak/data/config.yml)
 
 ```yaml
 device_name: "TrimUI Brick"
@@ -128,6 +168,14 @@ This project builds upon the following open-source projects:
 | [CrossMix OS](https://github.com/cizia64/CrossMix-OS) | — | Firmware base for TrimUI devices |
 
 Hardware: [TrimUI Brick](https://trimui.com)
+
+Release archives also include:
+
+- `LICENSES/NOTICE.md`
+- `LICENSES/THIRD_PARTY_SOURCES.md`
+- Full upstream license texts for bundled binaries
+
+Before publishing a GitHub release, record the exact upstream versions and checksums of the bundled third-party binaries in `LICENSES/THIRD_PARTY_SOURCES.md`.
 
 ## License
 

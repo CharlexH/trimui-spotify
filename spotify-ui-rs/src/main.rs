@@ -13,6 +13,7 @@ mod input;
 mod local_player;
 mod mode;
 mod network;
+mod paths;
 mod playlist_view;
 mod render;
 mod resources;
@@ -31,10 +32,18 @@ use font::FontSet;
 use framebuffer::Framebuffer;
 use local_player::LocalPlayer;
 use mode::{AppMode, InputAction};
+use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
 
 fn main() {
     eprintln!("sideb starting");
+    init_paths(detect_paths());
+    eprintln!(
+        "paths: app={} data={} resources={}",
+        app_paths().app_dir.display(),
+        app_paths().data_dir.display(),
+        app_paths().resources_dir.display()
+    );
 
     // Initialize framebuffer
     let fb = Framebuffer::open().unwrap_or_else(|e| {
@@ -74,14 +83,14 @@ fn main() {
     eprintln!("render caches ready");
 
     // Ensure data directories exist
-    let _ = std::fs::create_dir_all(MUSIC_DIR);
+    let _ = std::fs::create_dir_all(&app_paths().music_dir);
 
     let app_state = Arc::new(Mutex::new(AppState::new()));
     let render_state = Arc::new(Mutex::new(render_state));
     let quit = Arc::new(AtomicBool::new(false));
 
     // Initialize favorites and local player
-    let favorites = Arc::new(Mutex::new(FavoritesManager::load(FAVORITES_PATH)));
+    let favorites = Arc::new(Mutex::new(FavoritesManager::load(&app_paths().favorites_path)));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
 
     // Clean up orphaned files in music directory
@@ -628,7 +637,8 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
     let referenced = fav.referenced_files();
     drop(fav);
 
-    let entries = match std::fs::read_dir(MUSIC_DIR) {
+    let music_dir = app_paths().music_dir.clone();
+    let entries = match std::fs::read_dir(&music_dir) {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -654,7 +664,10 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
     }
 
     if removed > 0 {
-        eprintln!("cleanup: removed {removed} orphaned file(s) from {MUSIC_DIR}");
+        eprintln!(
+            "cleanup: removed {removed} orphaned file(s) from {}",
+            music_dir.display()
+        );
     }
 }
 

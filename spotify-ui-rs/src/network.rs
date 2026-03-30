@@ -692,6 +692,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn empty_render_state() -> Arc<Mutex<RenderState>> {
@@ -707,9 +708,18 @@ mod tests {
             cover_mask: None,
             img_playing: None,
             img_paused: None,
+            img_spotify_on: None,
+            img_spotify_off: None,
+            img_fav_on: None,
+            img_fav_off: None,
             requested_cover_url: None,
             applied_cover_url: None,
         }))
+    }
+
+    fn test_cmd_tx() -> mpsc::Sender<crate::mode::InputAction> {
+        let (tx, _rx) = mpsc::channel();
+        tx
     }
 
     fn make_event(event_type: &str, data: Option<&str>) -> WSEvent {
@@ -723,6 +733,7 @@ mod tests {
     fn repeated_paused_event_does_not_mark_dirty() {
         let state = Arc::new(Mutex::new(AppState::new()));
         let render_state = empty_render_state();
+        let cmd_tx = test_cmd_tx();
         {
             let mut st = state.lock().unwrap();
             st.paused = true;
@@ -730,7 +741,7 @@ mod tests {
             st.render_dirty = false;
         }
 
-        handle_event(make_event("paused", None), &state, &render_state);
+        handle_event(make_event("paused", None), &state, &render_state, &cmd_tx);
 
         let st = state.lock().unwrap();
         assert!(st.paused);
@@ -741,13 +752,14 @@ mod tests {
     fn will_pause_event_switches_to_paused_state() {
         let state = Arc::new(Mutex::new(AppState::new()));
         let render_state = empty_render_state();
+        let cmd_tx = test_cmd_tx();
         {
             let mut st = state.lock().unwrap();
             st.paused = false;
             st.render_dirty = false;
         }
 
-        handle_event(make_event("will_pause", None), &state, &render_state);
+        handle_event(make_event("will_pause", None), &state, &render_state, &cmd_tx);
 
         let st = state.lock().unwrap();
         assert!(st.paused);
@@ -758,6 +770,7 @@ mod tests {
     fn unchanged_volume_event_does_not_mark_dirty() {
         let state = Arc::new(Mutex::new(AppState::new()));
         let render_state = empty_render_state();
+        let cmd_tx = test_cmd_tx();
         {
             let mut st = state.lock().unwrap();
             st.volume = 80;
@@ -769,6 +782,7 @@ mod tests {
             make_event("volume", Some(r#"{"value":80,"max":100}"#)),
             &state,
             &render_state,
+            &cmd_tx,
         );
 
         let st = state.lock().unwrap();
@@ -781,6 +795,7 @@ mod tests {
     fn changed_volume_event_marks_dirty() {
         let state = Arc::new(Mutex::new(AppState::new()));
         let render_state = empty_render_state();
+        let cmd_tx = test_cmd_tx();
         {
             let mut st = state.lock().unwrap();
             st.volume = 80;
@@ -792,6 +807,7 @@ mod tests {
             make_event("volume", Some(r#"{"value":75,"max":100}"#)),
             &state,
             &render_state,
+            &cmd_tx,
         );
 
         let st = state.lock().unwrap();

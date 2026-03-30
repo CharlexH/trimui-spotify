@@ -1,0 +1,10 @@
+{
+  "name": "SideB",
+  "version": "1.0.1",
+  "type": "TOOL",
+  "description": "Spotify Connect receiver with offline favorites, local playback, and a cassette-tape UI",
+  "author": "CharlexH",
+  "repo_url": "https://github.com/CharlexH/SideB",
+  "release_filename": "SideB-{version}-nextui.zip",
+  "platforms": ["tg5040"]
+}

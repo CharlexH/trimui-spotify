@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 
 use jpeg_decoder::{ImageInfo as JpegImageInfo, PixelFormat};
 
+use crate::paths::detect_paths;
 use crate::types::RgbaImage;
 
 /// Build candidate paths for a resource file, matching Go logic.
@@ -18,10 +19,15 @@ pub fn resource_candidates(name: &str) -> Vec<PathBuf> {
         }
     };
 
+    let detected = detect_paths();
+    add(detected.resources_dir.join(name));
+    add(detected.app_dir.join("resources").join(name));
+
     add(Path::new("resources").join(name));
+    add(Path::new("package/SideB.pak/resources").join(name));
+    add(Path::new("../package/SideB.pak/resources").join(name));
     add(Path::new("package/SideB/resources").join(name));
     add(Path::new("../package/SideB/resources").join(name));
-    add(Path::new("/mnt/SDCARD/Apps/SideB/resources").join(name));
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -184,24 +190,26 @@ fn decode_jpeg_to_rgba(decoded_pixels: Vec<u8>, info: JpegImageInfo) -> Option<R
 
 /// Load font data from candidate paths. Returns the raw bytes.
 pub fn load_font_data() -> Option<Vec<u8>> {
-    let paths = [
-        "resources/font_mono.ttf",
-        "resources/font.ttf",
-        "../package/SpotifyConnect/resources/font_mono.ttf",
-        "../package/SpotifyConnect/resources/font.ttf",
-        "/usr/trimui/res/font/CJKFont.ttf",
-        "/usr/trimui/apps/bookreader/regular.ttf",
-    ];
-
-    for path in &paths {
-        if let Ok(mut f) = File::open(path) {
-            let mut data = Vec::new();
-            if f.read_to_end(&mut data).is_ok() {
-                eprintln!("using font: {path}");
-                return Some(data);
+    for candidate in ["font_mono.ttf", "font.ttf"] {
+        if let Some(path) = find_resource(candidate) {
+            if let Ok(mut f) = File::open(&path) {
+                let mut data = Vec::new();
+                if f.read_to_end(&mut data).is_ok() {
+                    eprintln!("using font: {}", path.display());
+                    return Some(data);
+                }
             }
         }
     }
+
+    if let Ok(mut f) = File::open("/usr/trimui/res/font/CJKFont.ttf") {
+        let mut data = Vec::new();
+        if f.read_to_end(&mut data).is_ok() {
+            eprintln!("using font: /usr/trimui/res/font/CJKFont.ttf");
+            return Some(data);
+        }
+    }
+
     None
 }
 

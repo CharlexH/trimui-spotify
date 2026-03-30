@@ -27,8 +27,8 @@ pub struct FavoritesManager {
 
 impl FavoritesManager {
     /// Load favorites from JSON file. Returns empty list if file is missing or corrupt.
-    pub fn load(path: &str) -> Self {
-        let path = PathBuf::from(path);
+    pub fn load(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
         let entries = if path.exists() {
             match fs::read_to_string(&path) {
                 Ok(data) => match serde_json::from_str::<Vec<FavoriteEntry>>(&data) {

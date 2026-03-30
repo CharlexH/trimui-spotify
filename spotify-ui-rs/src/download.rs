@@ -4,8 +4,9 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::constants::{FFMPEG_FULL_BIN, MUSIC_DIR, YTDLP_BIN};
+use crate::constants::{FFMPEG_FULL_BIN, YTDLP_BIN};
 use crate::favorites::FavoritesManager;
+use crate::paths::app_paths;
 
 const MAX_RETRIES: u32 = 1;
 const RETRY_DELAY_SECS: u64 = 3;
@@ -99,13 +100,14 @@ fn download_loop(
         }
 
         // Ensure music directory exists
-        let _ = std::fs::create_dir_all(MUSIC_DIR);
+        let music_dir = app_paths().music_dir.clone();
+        let _ = std::fs::create_dir_all(&music_dir);
 
         let safe_artist = sanitize_filename(&req.artist_name);
         let safe_track = sanitize_filename(&req.track_name);
         let base_name = format!("{} - {}", safe_artist, safe_track);
-        let output_path = PathBuf::from(MUSIC_DIR).join(format!("{}.mp3", base_name));
-        let cover_path = PathBuf::from(MUSIC_DIR).join(format!("{}.jpg", base_name));
+        let output_path = music_dir.join(format!("{}.mp3", base_name));
+        let cover_path = music_dir.join(format!("{}.jpg", base_name));
 
         // Clean up partial file from previous failed attempt
         if output_path.exists() {

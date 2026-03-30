@@ -86,9 +86,5 @@ pub const PLAYLIST_HEADER_HEIGHT: i32 = 56;
 pub const PLAYLIST_FOOTER_HEIGHT: i32 = 40;
 pub const PLAYLIST_VISIBLE_ITEMS: usize = 12;
 
-// Data paths
-pub const DATA_DIR: &str = "/mnt/SDCARD/Apps/SideB/data";
-pub const MUSIC_DIR: &str = "/mnt/SDCARD/Apps/SideB/data/music";
-pub const FAVORITES_PATH: &str = "/mnt/SDCARD/Apps/SideB/data/favorites.json";
 pub const YTDLP_BIN: &str = "/tmp/yt-dlp";
 pub const FFMPEG_FULL_BIN: &str = "/tmp/ffmpeg-full";
