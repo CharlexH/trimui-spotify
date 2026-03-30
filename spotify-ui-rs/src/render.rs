@@ -182,6 +182,17 @@ fn centered_text_x(screen_width: i32, text_width: i32) -> i32 {
     ((screen_width - text_width).max(0)) / 2
 }
 
+fn playback_footer_labels() -> [&'static str; 6] {
+    [
+        "PREV/NEXT (←/→)",
+        "VOL+/- (↑/↓)",
+        "PLAY/PAUSE (A)",
+        "FAV (X)",
+        "LIST (Y)",
+        "EXIT (B)",
+    ]
+}
+
 /// Holds all pre-computed scene buffers and caches.
 pub struct RenderState {
     pub scene_base: Vec<u8>,
@@ -256,15 +267,7 @@ impl RenderState {
     fn rebuild_base_scene(&mut self, fonts: &FontSet) {
         drawing::clear_buffer(&mut self.scene_base, 0, 0, 0, 255);
 
-        let hint_labels = [
-            "PREV [\u{2190}]",
-            "NEXT [\u{2192}]",
-            "VOL+ [\u{2191}]",
-            "VOL- [\u{2193}]",
-            "FAV [Y]",
-            "PLAY [A]",
-            "EXIT [B]",
-        ];
+        let hint_labels = playback_footer_labels();
 
         let total_width: i32 = hint_labels
             .iter()
@@ -920,6 +923,21 @@ mod tests {
         }
 
         assert_eq!(mode.target_fps(), BASE_ANIM_FPS);
+    }
+
+    #[test]
+    fn playback_footer_labels_match_reference_copy() {
+        assert_eq!(
+            playback_footer_labels(),
+            [
+                "PREV/NEXT (←/→)",
+                "VOL+/- (↑/↓)",
+                "PLAY/PAUSE (A)",
+                "FAV (X)",
+                "LIST (Y)",
+                "EXIT (B)",
+            ]
+        );
     }
 
     #[test]

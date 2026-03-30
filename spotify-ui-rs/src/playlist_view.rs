@@ -3,6 +3,21 @@ use crate::drawing;
 use crate::favorites::FavoriteEntry;
 use crate::font::FontSet;
 
+struct PlaylistItemLayout {
+    text_y: i32,
+    indicator_y: i32,
+    triangle_center_y: i32,
+    triangle_height: i32,
+    triangle_width: i32,
+    triangle_text_gap: i32,
+}
+
+struct PlaylistFooterStyle {
+    text_y: i32,
+    color: (u8, u8, u8),
+    use_small_font: bool,
+}
+
 /// Render the full-screen playlist overlay onto the back buffer.
 pub fn render_playlist_overlay(
     buf: &mut [u8],
@@ -15,7 +30,7 @@ pub fn render_playlist_overlay(
     drawing::fill_rect(buf, 0, 0, SCREEN_W as i32, SCREEN_H as i32, 0, 0, 0, 255);
 
     // Header
-    let title = format!("FAVORITES ({})", entries.len());
+    let title = playlist_title(entries.len());
     let title_w = fonts.measure_text(&title, fonts.scale_large);
     let title_x = (SCREEN_W as i32 - title_w) / 2;
     fonts.draw_text(
@@ -79,6 +94,7 @@ pub fn render_playlist_overlay(
 
             let entry = &entries[entry_idx];
             let item_y = list_y_start + (i as i32) * PLAYLIST_ITEM_HEIGHT;
+            let layout = playlist_item_layout(item_y);
 
             // Highlight selected item
             if entry_idx == selected {
@@ -98,27 +114,12 @@ pub fn render_playlist_overlay(
             // Playing indicator
             let text_start_x = PLAYLIST_X + 16;
             let is_playing = playing_uri.map_or(false, |uri| uri == entry.uri);
+            let triangle_color = playlist_triangle_color(entry_idx == selected);
             if is_playing {
-                // Small triangle ▶
-                let tri_x = text_start_x;
-                let tri_y = item_y + PLAYLIST_ITEM_HEIGHT / 2;
-                for dy in -5i32..=5 {
-                    let width = 5 - dy.abs();
-                    for dx in 0..width {
-                        drawing::blend_pixel(
-                            buf,
-                            tri_x + dx,
-                            tri_y + dy,
-                            100,
-                            255,
-                            100,
-                            255,
-                        );
-                    }
-                }
+                draw_playlist_play_triangle(buf, text_start_x, &layout, triangle_color);
             }
 
-            let name_x = text_start_x + 16;
+            let name_x = playlist_name_x(text_start_x, &layout);
 
             // Track name (truncated) — black text when selected, white otherwise
             let display_name = truncate_str(&entry.name, 28);
@@ -131,7 +132,7 @@ pub fn render_playlist_overlay(
                 buf,
                 &display_name,
                 name_x,
-                item_y + 30,
+                layout.text_y,
                 name_r,
                 name_g,
                 name_b,
@@ -151,7 +152,7 @@ pub fn render_playlist_overlay(
                 buf,
                 &artist_display,
                 artist_x,
-                item_y + 30,
+                layout.text_y,
                 art_r,
                 art_g,
                 art_b,
@@ -160,7 +161,7 @@ pub fn render_playlist_overlay(
 
             // Download status indicator (right edge)
             let indicator_x = PLAYLIST_X + PLAYLIST_W - 32;
-            let indicator_y = item_y + PLAYLIST_ITEM_HEIGHT / 2;
+            let indicator_y = layout.indicator_y;
             if entry.downloaded {
                 // Green filled circle
                 draw_circle_filled(buf, indicator_x, indicator_y, 6, 80, 200, 80, 255);
@@ -202,11 +203,11 @@ pub fn render_playlist_overlay(
     }
 
     // Footer with control hints
-    let footer_y = SCREEN_H as i32 - PLAYLIST_MARGIN - 4;
+    let footer_style = playlist_footer_style();
     drawing::fill_rect(
         buf,
         PLAYLIST_X,
-        footer_y - PLAYLIST_FOOTER_HEIGHT,
+        playlist_footer_divider_y(),
         PLAYLIST_W,
         1,
         100,
@@ -215,19 +216,115 @@ pub fn render_playlist_overlay(
         255,
     );
 
-    let hints = "UP/DOWN Navigate    A Play    X Delete    B Close";
-    let hints_w = fonts.measure_text(hints, fonts.scale_small);
+    let hints = playlist_footer_hints();
+    let hints_scale = if footer_style.use_small_font {
+        fonts.scale_small
+    } else {
+        fonts.scale_large
+    };
+    let hints_w = fonts.measure_text(hints, hints_scale);
     let hints_x = (SCREEN_W as i32 - hints_w) / 2;
     fonts.draw_text(
         buf,
         hints,
         hints_x,
-        footer_y - 8,
-        150,
-        150,
-        150,
-        fonts.scale_small,
+        footer_style.text_y,
+        footer_style.color.0,
+        footer_style.color.1,
+        footer_style.color.2,
+        hints_scale,
     );
+}
+
+fn playlist_item_layout(item_y: i32) -> PlaylistItemLayout {
+    PlaylistItemLayout {
+        text_y: item_y + 32,
+        indicator_y: item_y + PLAYLIST_ITEM_HEIGHT / 2 - 2,
+        triangle_center_y: item_y + PLAYLIST_ITEM_HEIGHT / 2 - 1,
+        triangle_height: 20,
+        triangle_width: 10,
+        triangle_text_gap: 8,
+    }
+}
+
+fn playlist_name_x(triangle_x: i32, layout: &PlaylistItemLayout) -> i32 {
+    triangle_x + layout.triangle_width + layout.triangle_text_gap
+}
+
+fn draw_playlist_play_triangle(
+    buf: &mut [u8],
+    triangle_x: i32,
+    layout: &PlaylistItemLayout,
+    color: (u8, u8, u8),
+) {
+    let tri_half_height = layout.triangle_height / 2;
+    for dy in -tri_half_height..=tri_half_height {
+        let row_width = triangle_row_width(dy, layout);
+        for dx in 0..row_width {
+            if triangle_pixel_visible(dx, dy, layout) {
+                drawing::blend_pixel(
+                    buf,
+                    triangle_x + dx,
+                    layout.triangle_center_y + dy,
+                    color.0,
+                    color.1,
+                    color.2,
+                    255,
+                );
+            }
+        }
+    }
+}
+
+fn playlist_triangle_color(selected: bool) -> (u8, u8, u8) {
+    if selected {
+        (0, 0, 0)
+    } else {
+        (255, 255, 255)
+    }
+}
+
+fn triangle_row_width(dy: i32, layout: &PlaylistItemLayout) -> i32 {
+    let tri_half_height = layout.triangle_height / 2;
+    ((tri_half_height + 1 - dy.abs()) * layout.triangle_width) / (tri_half_height + 1)
+}
+
+fn triangle_pixel_visible(dx: i32, dy: i32, layout: &PlaylistItemLayout) -> bool {
+    let tri_half_height = layout.triangle_height / 2;
+    if dy < -tri_half_height || dy > tri_half_height {
+        return false;
+    }
+
+    let row_width = triangle_row_width(dy, layout);
+    if dx < 0 || dx >= row_width {
+        return false;
+    }
+
+    let top_corner = dy <= -tri_half_height + 1 && dx == 0;
+    let bottom_corner = dy >= tri_half_height - 1 && dx == 0;
+    let tip_corner = dx == row_width - 1 && dy.abs() <= 1;
+
+    !(top_corner || bottom_corner || tip_corner)
+}
+
+fn playlist_title(count: usize) -> String {
+    format!("FAV LIST ({count})")
+}
+
+fn playlist_footer_hints() -> &'static str {
+    "NAVIGATE (↑/↓)   PLAY (A)   DELETE (X)   BACK (B)"
+}
+
+fn playlist_footer_style() -> PlaylistFooterStyle {
+    PlaylistFooterStyle {
+        text_y: HINTS_BASELINE_Y,
+        color: (0x3D, 0x3D, 0x3D),
+        use_small_font: true,
+    }
+}
+
+fn playlist_footer_divider_y() -> i32 {
+    SCREEN_H as i32 - PLAYLIST_MARGIN - 4 - PLAYLIST_FOOTER_HEIGHT + 12
 }
 
 /// Truncate a string to max_chars, appending "..." if truncated.
@@ -260,5 +357,73 @@ fn draw_circle_outline(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8,
                 drawing::blend_pixel(buf, cx + dx, cy + dy, red, g, b, a);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playlist_item_layout_offsets_match_visual_tuning() {
+        let item_y = 200;
+        let layout = playlist_item_layout(item_y);
+
+        assert_eq!(layout.text_y, item_y + 32);
+        assert_eq!(layout.indicator_y, item_y + PLAYLIST_ITEM_HEIGHT / 2 - 2);
+        assert_eq!(layout.triangle_center_y, item_y + PLAYLIST_ITEM_HEIGHT / 2 - 1);
+        assert_eq!(layout.triangle_height, 20);
+        assert_eq!(layout.triangle_width, 10);
+        assert_eq!(layout.triangle_text_gap, 8);
+    }
+
+    #[test]
+    fn playlist_triangle_keeps_eight_pixel_gap_before_text() {
+        let layout = playlist_item_layout(200);
+
+        assert_eq!(playlist_name_x(64, &layout), 82);
+    }
+
+    #[test]
+    fn rounded_triangle_clips_all_three_corners() {
+        let layout = playlist_item_layout(200);
+
+        assert!(!triangle_pixel_visible(0, -9, &layout));
+        assert!(!triangle_pixel_visible(0, 9, &layout));
+        assert!(!triangle_pixel_visible(layout.triangle_width - 1, 0, &layout));
+        assert!(triangle_pixel_visible(1, -8, &layout));
+        assert!(triangle_pixel_visible(layout.triangle_width - 2, 0, &layout));
+    }
+
+    #[test]
+    fn playlist_triangle_color_matches_track_name_state() {
+        assert_eq!(playlist_triangle_color(false), (255, 255, 255));
+        assert_eq!(playlist_triangle_color(true), (0, 0, 0));
+    }
+
+    #[test]
+    fn playlist_overlay_copy_matches_updated_ui_language() {
+        assert_eq!(playlist_title(3), "FAV LIST (3)");
+        assert_eq!(
+            playlist_footer_hints(),
+            "NAVIGATE (↑/↓)   PLAY (A)   DELETE (X)   BACK (B)"
+        );
+    }
+
+    #[test]
+    fn playlist_footer_style_matches_playback_auxiliary_text() {
+        let style = playlist_footer_style();
+
+        assert_eq!(style.text_y, HINTS_BASELINE_Y);
+        assert_eq!(style.color, (0x3D, 0x3D, 0x3D));
+        assert!(style.use_small_font);
+    }
+
+    #[test]
+    fn playlist_footer_divider_moves_down_twelve_pixels() {
+        assert_eq!(
+            playlist_footer_divider_y(),
+            SCREEN_H as i32 - PLAYLIST_MARGIN - 4 - PLAYLIST_FOOTER_HEIGHT + 12
+        );
     }
 }
