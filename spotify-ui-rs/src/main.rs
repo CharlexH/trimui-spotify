@@ -10,6 +10,7 @@ mod font;
 mod framebuffer;
 mod image_ops;
 mod input;
+mod local_import;
 mod local_player;
 mod mode;
 mod network;
@@ -23,11 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{collections::HashMap};
 
 use app::{AppState, Assets};
 use constants::*;
 use download::{DownloadManager, DownloadRequest};
-use favorites::{FavoriteEntry, FavoritesManager};
+use favorites::{FavoriteEntry, FavoriteSource, FavoritesManager};
 use font::FontSet;
 use framebuffer::Framebuffer;
 use local_player::LocalPlayer;
@@ -84,14 +86,21 @@ fn main() {
 
     // Ensure data directories exist
     let _ = std::fs::create_dir_all(&app_paths().music_dir);
+    let _ = std::fs::create_dir_all(&app_paths().imports_dir);
 
     let app_state = Arc::new(Mutex::new(AppState::new()));
     let render_state = Arc::new(Mutex::new(render_state));
     let quit = Arc::new(AtomicBool::new(false));
+    let pending_removals = Arc::new(Mutex::new(HashMap::<String, FavoriteEntry>::new()));
 
     // Initialize favorites and local player
     let favorites = Arc::new(Mutex::new(FavoritesManager::load(&app_paths().favorites_path)));
     let local_player = Arc::new(Mutex::new(LocalPlayer::new()));
+
+    let imported = local_import::scan_once(&favorites);
+    if imported > 0 {
+        eprintln!("import: startup imported {imported} local track(s)");
+    }
 
     // Clean up orphaned files in music directory
     cleanup_orphaned_files(&favorites);
@@ -179,6 +188,7 @@ fn main() {
     let cmd_render_state = Arc::clone(&render_state);
     let cmd_favorites = Arc::clone(&favorites);
     let cmd_local_player = Arc::clone(&local_player);
+    let cmd_pending_removals = Arc::clone(&pending_removals);
     let cmd_quit = Arc::clone(&quit);
     let _cmd_handle = std::thread::Builder::new()
         .name("command".into())
@@ -189,17 +199,30 @@ fn main() {
                 cmd_render_state,
                 cmd_favorites,
                 cmd_local_player,
+                cmd_pending_removals,
                 download_manager,
                 cmd_quit,
             );
         })
         .expect("spawn command processor thread");
 
+    // Spawn local import monitor thread
+    let import_favorites = Arc::clone(&favorites);
+    let import_quit = Arc::clone(&quit);
+    let import_cmd_tx = cmd_tx.clone();
+    let _import_handle = std::thread::Builder::new()
+        .name("local-import".into())
+        .spawn(move || {
+            local_import::run(import_favorites, import_cmd_tx, import_quit);
+        })
+        .expect("spawn local import thread");
+
     // Spawn local playback monitor thread
     let mon_app_state = Arc::clone(&app_state);
     let mon_render_state = Arc::clone(&render_state);
     let mon_local_player = Arc::clone(&local_player);
     let mon_favorites = Arc::clone(&favorites);
+    let mon_pending_removals = Arc::clone(&pending_removals);
     let mon_quit = Arc::clone(&quit);
     let _mon_handle = std::thread::Builder::new()
         .name("local-monitor".into())
@@ -209,6 +232,7 @@ fn main() {
                 mon_render_state,
                 mon_local_player,
                 mon_favorites,
+                mon_pending_removals,
                 mon_quit,
             );
         })
@@ -275,6 +299,7 @@ fn command_processor(
     render_state: Arc<Mutex<RenderState>>,
     favorites: Arc<Mutex<FavoritesManager>>,
     local_player: Arc<Mutex<LocalPlayer>>,
+    pending_removals: Arc<Mutex<HashMap<String, FavoriteEntry>>>,
     download_manager: DownloadManager,
     quit: Arc<AtomicBool>,
 ) {
@@ -287,19 +312,13 @@ fn command_processor(
             InputAction::RequestExit => {
                 let mut st = app_state.lock().unwrap();
                 let now = Instant::now();
-                if let Some(until) = st.exit_confirm_until {
-                    if now < until {
-                        // Second press within window — actually exit
-                        eprintln!("exit confirmed via B (double press)");
-                        drop(st);
-                        quit.store(true, Ordering::Relaxed);
-                        return;
-                    }
+                if st.request_exit_confirmation(now) {
+                    eprintln!("exit confirmed via B (double press)");
+                    drop(st);
+                    quit.store(true, Ordering::Relaxed);
+                    return;
                 }
-                // First press — show confirmation, start 2s window
                 eprintln!("exit: press B again within 2s to confirm");
-                st.exit_confirm_until = Some(now + Duration::from_secs(2));
-                st.render_dirty = true;
             }
 
             InputAction::ExitApp => {
@@ -348,11 +367,31 @@ fn command_processor(
                     continue;
                 }
 
+                let current_local_uri = current_local_track_uri(&local_player);
                 let mut fav = favorites.lock().unwrap();
                 if fav.is_favorited(&uri) {
-                    // Unfavorite
-                    fav.remove(&uri);
-                    app_state.lock().unwrap().set_favorited(false);
+                    let now = Instant::now();
+                    let confirmed = app_state
+                        .lock()
+                        .unwrap()
+                        .request_remove_confirmation(&uri, now);
+                    if !confirmed {
+                        eprintln!("remove: press X again within 2s to confirm {uri}");
+                        continue;
+                    }
+                    if should_defer_favorite_file_deletion(current_local_uri.as_deref(), &uri) {
+                        if let Some(entry) = fav.remove_preserving_files(&uri) {
+                            pending_removals.lock().unwrap().insert(uri.clone(), entry);
+                        }
+                    } else {
+                        fav.remove(&uri);
+                    }
+                    let mut st = app_state.lock().unwrap();
+                    st.clear_confirmation();
+                    st.set_favorited(false);
+                    drop(st);
+                    drop(fav);
+                    refresh_library_state(&app_state, &render_state, &favorites, &local_player);
                     eprintln!("cmd: unfavorited {}", uri);
                 } else {
                     // Favorite + trigger download
@@ -366,22 +405,32 @@ fn command_processor(
                         artist: artist.clone(),
                         album: album.clone(),
                         cover_url: cover_url.clone(),
+                        source: FavoriteSource::Spotify,
                         file_path: None,
                         cover_path: None,
                         duration_ms: None,
                         downloaded: false,
                         added_at: format!("{}", now),
                     };
-                    fav.add(entry);
+                    let restored = pending_removals.lock().unwrap().remove(&uri);
+                    if let Some(restored) = restored {
+                        fav.add(restored);
+                    } else {
+                        fav.add(entry);
+                    }
                     app_state.lock().unwrap().set_favorited(true);
+                    drop(fav);
+                    refresh_library_state(&app_state, &render_state, &favorites, &local_player);
 
-                    // Trigger download
-                    download_manager.enqueue(DownloadRequest {
-                        uri,
-                        track_name: name,
-                        artist_name: artist,
-                        cover_url,
-                    });
+                    if !favorites.lock().unwrap().find_by_uri(&uri).map(|entry| entry.downloaded).unwrap_or(false) {
+                        // Trigger download only for genuinely new favorites.
+                        download_manager.enqueue(DownloadRequest {
+                            uri,
+                            track_name: name,
+                            artist_name: artist,
+                            cover_url,
+                        });
+                    }
                 }
             }
 
@@ -563,12 +612,30 @@ fn command_processor(
                 };
 
                 if let Some(uri) = uri {
+                    let current_local_uri = current_local_track_uri(&local_player);
+                    let now = Instant::now();
+                    let confirmed = app_state
+                        .lock()
+                        .unwrap()
+                        .request_remove_confirmation(&uri, now);
+                    if !confirmed {
+                        eprintln!("remove: press X again within 2s to confirm {uri}");
+                        continue;
+                    }
+
                     let mut fav = favorites.lock().unwrap();
-                    fav.remove(&uri);
+                    if should_defer_favorite_file_deletion(current_local_uri.as_deref(), &uri) {
+                        if let Some(entry) = fav.remove_preserving_files(&uri) {
+                            pending_removals.lock().unwrap().insert(uri.clone(), entry);
+                        }
+                    } else {
+                        fav.remove(&uri);
+                    }
                     let count = fav.count();
                     drop(fav);
 
                     let mut st = app_state.lock().unwrap();
+                    st.clear_confirmation();
                     st.set_playlist_count(count);
                     if st.playlist_selected >= count && count > 0 {
                         st.set_playlist_selected(count - 1);
@@ -582,7 +649,13 @@ fn command_processor(
                     if current_uri.as_deref() == Some(&uri) {
                         st.set_favorited(false);
                     }
+                    drop(st);
+                    refresh_library_state(&app_state, &render_state, &favorites, &local_player);
                 }
+            }
+
+            InputAction::LibraryChanged => {
+                refresh_library_state(&app_state, &render_state, &favorites, &local_player);
             }
 
             InputAction::SpotifyActivated => {
@@ -628,6 +701,13 @@ fn command_processor(
                 }
             }
         }
+
+        let current_local_uri = current_local_track_uri(&local_player);
+        finalize_pending_removals(
+            &pending_removals,
+            &favorites,
+            current_local_uri.as_deref(),
+        );
     }
 }
 
@@ -650,7 +730,7 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
 
         // Only clean up .mp3 and .jpg files
         match path.extension().and_then(|e| e.to_str()) {
-            Some("mp3") | Some("jpg") => {}
+            Some("mp3") | Some("jpg") | Some("jpeg") | Some("png") => {}
             _ => continue,
         }
 
@@ -668,6 +748,132 @@ fn cleanup_orphaned_files(favorites: &Arc<Mutex<FavoritesManager>>) {
             "cleanup: removed {removed} orphaned file(s) from {}",
             music_dir.display()
         );
+    }
+}
+
+fn current_local_track_uri(local_player: &Arc<Mutex<LocalPlayer>>) -> Option<String> {
+    local_player
+        .lock()
+        .unwrap()
+        .current_entry()
+        .map(|entry| entry.uri.clone())
+}
+
+fn should_defer_favorite_file_deletion(current_local_uri: Option<&str>, removed_uri: &str) -> bool {
+    matches!(current_local_uri, Some(uri) if uri == removed_uri)
+}
+
+fn pending_removal_uris_ready_for_finalization(
+    pending: &HashMap<String, FavoriteEntry>,
+    current_local_uri: Option<&str>,
+) -> Vec<String> {
+    pending
+        .keys()
+        .filter(|uri| Some(uri.as_str()) != current_local_uri)
+        .cloned()
+        .collect()
+}
+
+fn finalize_pending_removals(
+    pending_removals: &Arc<Mutex<HashMap<String, FavoriteEntry>>>,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    current_local_uri: Option<&str>,
+) {
+    let ready_entries = {
+        let mut pending = pending_removals.lock().unwrap();
+        let ready_uris = pending_removal_uris_ready_for_finalization(&pending, current_local_uri);
+        let mut ready_entries = Vec::with_capacity(ready_uris.len());
+        for uri in ready_uris {
+            if let Some(entry) = pending.remove(&uri) {
+                ready_entries.push(entry);
+            }
+        }
+        ready_entries
+    };
+
+    if ready_entries.is_empty() {
+        return;
+    }
+
+    let favorited_uris = {
+        let fav = favorites.lock().unwrap();
+        fav.all_entries()
+            .iter()
+            .map(|entry| entry.uri.clone())
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    for entry in ready_entries {
+        if favorited_uris.contains(&entry.uri) {
+            continue;
+        }
+        FavoritesManager::delete_entry_files(&entry);
+    }
+}
+
+fn refresh_library_state(
+    app_state: &Arc<Mutex<AppState>>,
+    render_state: &Arc<Mutex<RenderState>>,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    local_player: &Arc<Mutex<LocalPlayer>>,
+) {
+    let (count, downloaded) = {
+        let fav = favorites.lock().unwrap();
+        (fav.count(), fav.downloaded_entries())
+    };
+
+    {
+        let mut player = local_player.lock().unwrap();
+        player.refresh_playlist(downloaded.clone());
+    }
+
+    let mut seed_entry: Option<FavoriteEntry> = None;
+    let mut clear_cover = false;
+    {
+        let player_active = local_player.lock().unwrap().is_active();
+        let mut st = app_state.lock().unwrap();
+        st.set_playlist_count(count);
+        if count == 0 {
+            st.set_playlist_selected(0);
+        } else if st.playlist_selected >= count {
+            st.set_playlist_selected(count - 1);
+        }
+
+        let current_uri = st.current_track_uri.clone();
+        let current_still_downloaded = downloaded.iter().any(|entry| entry.uri == current_uri);
+
+        if !player_active && st.mode != AppMode::Spotify {
+            if let Some(entry) = downloaded.first() {
+                if current_uri.is_empty() || !current_still_downloaded {
+                    st.set_mode(AppMode::Local);
+                    st.set_paused(true);
+                    st.current_track_uri = entry.uri.clone();
+                    st.track_name = entry.name.clone();
+                    st.artist_name = entry.artist.clone();
+                    st.album_name = entry.album.clone();
+                    st.set_duration(entry.duration_ms.unwrap_or(0));
+                    st.set_position(0, Instant::now());
+                    st.set_favorited(true);
+                    seed_entry = Some(entry.clone());
+                }
+            } else {
+                st.set_mode(AppMode::Waiting);
+                st.current_track_uri.clear();
+                st.track_name.clear();
+                st.artist_name.clear();
+                st.album_name.clear();
+                st.set_duration(0);
+                st.set_position(0, Instant::now());
+                st.set_favorited(false);
+                clear_cover = true;
+            }
+        }
+    }
+
+    if let Some(entry) = seed_entry {
+        load_local_cover(&entry, render_state);
+    } else if clear_cover {
+        network::update_cover(None, render_state);
     }
 }
 
@@ -721,6 +927,7 @@ fn local_playback_monitor(
     render_state: Arc<Mutex<RenderState>>,
     local_player: Arc<Mutex<LocalPlayer>>,
     favorites: Arc<Mutex<FavoritesManager>>,
+    pending_removals: Arc<Mutex<HashMap<String, FavoriteEntry>>>,
     quit: Arc<AtomicBool>,
 ) {
     loop {
@@ -728,6 +935,9 @@ fn local_playback_monitor(
         if quit.load(Ordering::Relaxed) {
             return;
         }
+
+        let current_local_uri = current_local_track_uri(&local_player);
+        finalize_pending_removals(&pending_removals, &favorites, current_local_uri.as_deref());
 
         let mode = app_state.lock().unwrap().mode;
         if mode != AppMode::Local {
@@ -763,5 +973,54 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     if ptr != 0 {
         let flag = unsafe { &*(ptr as *const AtomicBool) };
         flag.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::favorites::FavoriteSource;
+
+    fn test_entry(uri: &str) -> FavoriteEntry {
+        FavoriteEntry {
+            uri: uri.to_string(),
+            name: "Track".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_url: String::new(),
+            source: FavoriteSource::Spotify,
+            file_path: Some(format!("/tmp/{uri}.mp3")),
+            cover_path: None,
+            duration_ms: Some(1_000),
+            downloaded: true,
+            added_at: "0".to_string(),
+        }
+    }
+
+    #[test]
+    fn current_local_track_removal_is_the_only_case_that_defers_file_deletion() {
+        assert!(should_defer_favorite_file_deletion(Some("track:1"), "track:1"));
+        assert!(!should_defer_favorite_file_deletion(Some("track:1"), "track:2"));
+        assert!(!should_defer_favorite_file_deletion(None, "track:1"));
+    }
+
+    #[test]
+    fn pending_removals_finalize_after_track_changes_away() {
+        let mut pending = HashMap::new();
+        pending.insert("track:1".to_string(), test_entry("track:1"));
+        pending.insert("track:2".to_string(), test_entry("track:2"));
+
+        let mut ready_while_track_one_is_current =
+            pending_removal_uris_ready_for_finalization(&pending, Some("track:1"));
+        ready_while_track_one_is_current.sort();
+        assert_eq!(ready_while_track_one_is_current, vec!["track:2".to_string()]);
+
+        let mut ready_with_no_current =
+            pending_removal_uris_ready_for_finalization(&pending, None);
+        ready_with_no_current.sort();
+        assert_eq!(
+            ready_with_no_current,
+            vec!["track:1".to_string(), "track:2".to_string()]
+        );
     }
 }

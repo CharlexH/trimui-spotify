@@ -18,6 +18,7 @@ Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with o
 - Browse and manage favorites in a full-screen playlist overlay (press Y)
 - Cached favorites can be played back locally when Wi-Fi is unavailable
 - Shuffle playback with prev/next track navigation
+- Drop local MP3 files into `data/imports/` and SideB will auto-import them into `FAV LIST`
 
 ## How It Works
 
@@ -29,6 +30,8 @@ The app consists of two components:
 ### Offline playback pipeline
 
 When a user marks a track as a favorite, the app searches for a matching publicly available audio source on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp) and caches it locally as an MP3 file on the SD card. Cached audio is played back through an `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache.
+
+For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art when available, and adds the track to `FAV LIST` as a managed local item.
 
 **Important**: The app does **not** intercept, decrypt, or extract audio from Spotify streams. Spotify playback and offline caching use entirely separate audio paths.
 
@@ -57,9 +60,37 @@ This software is provided as-is for educational and personal use. It is not inte
 | **A** | Play / Pause |
 | **← / →** | Previous / Next track |
 | **↑ / ↓** | Volume up / down |
-| **X** | Toggle favorite |
+| **X** | Favorite, or press twice to remove a favorite |
 | **Y** | Open / close playlist |
 | **B** / **MENU** | Exit app |
+
+## Local Playback Usage
+
+### Spotify favorites
+
+1. Start playback from Spotify Connect.
+2. Press **X** to add the current track to favorites.
+3. Wait for the background download to finish.
+4. Press **A** on the device to start local playback from the downloaded library, or press **Y** to pick a downloaded track from `FAV LIST`.
+
+### Import your own MP3 files
+
+Copy `.mp3` files into the `data/imports/` folder inside the app directory:
+
+```text
+NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/data/imports/
+Stock    -> /mnt/SDCARD/Apps/SideB/data/imports/
+CrossMix -> /mnt/SDCARD/Apps/SideB/data/imports/
+```
+
+SideB scans that folder automatically at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks.
+
+Notes:
+
+- Current manual import support is `MP3` only.
+- Embedded cover art is preferred. If no embedded cover exists, SideB will try to use a same-name sidecar image next to the MP3 during import.
+- Press **X** once to show the remove confirmation, then press **X** again to actually remove the track from favorites.
+- If you remove the track that is currently playing locally, SideB keeps the managed file until playback moves away from that track. If you favorite it again before switching tracks, the cached file is preserved.
 
 ## Build
 

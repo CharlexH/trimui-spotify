@@ -3,6 +3,20 @@ use std::time::Instant;
 use crate::mode::AppMode;
 use crate::types::RgbaImage;
 
+const CONFIRM_WINDOW_SECS: u64 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmationKind {
+    ExitApp,
+    RemoveFavorite { uri: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfirmationState {
+    pub kind: ConfirmationKind,
+    pub until: Instant,
+}
+
 /// Mutable application state protected by a Mutex.
 pub struct AppState {
     // -- Spotify playback --
@@ -34,8 +48,8 @@ pub struct AppState {
     pub playlist_selected: usize,
     pub playlist_count: usize,
 
-    // -- Exit confirmation --
-    pub exit_confirm_until: Option<Instant>,
+    // -- Confirmations --
+    pub confirmation: Option<ConfirmationState>,
 }
 
 impl AppState {
@@ -71,7 +85,65 @@ impl AppState {
             playlist_selected: 0,
             playlist_count: 0,
 
-            exit_confirm_until: None,
+            confirmation: None,
+        }
+    }
+
+    pub fn request_exit_confirmation(&mut self, now: Instant) -> bool {
+        if let Some(confirm) = &self.confirmation {
+            if matches!(confirm.kind, ConfirmationKind::ExitApp) && now < confirm.until {
+                return true;
+            }
+        }
+        self.confirmation = Some(ConfirmationState {
+            kind: ConfirmationKind::ExitApp,
+            until: now + std::time::Duration::from_secs(CONFIRM_WINDOW_SECS),
+        });
+        self.render_dirty = true;
+        false
+    }
+
+    pub fn request_remove_confirmation(&mut self, uri: &str, now: Instant) -> bool {
+        if let Some(confirm) = &self.confirmation {
+            if let ConfirmationKind::RemoveFavorite { uri: pending_uri } = &confirm.kind {
+                if pending_uri == uri && now < confirm.until {
+                    return true;
+                }
+            }
+        }
+        self.confirmation = Some(ConfirmationState {
+            kind: ConfirmationKind::RemoveFavorite {
+                uri: uri.to_string(),
+            },
+            until: now + std::time::Duration::from_secs(CONFIRM_WINDOW_SECS),
+        });
+        self.render_dirty = true;
+        false
+    }
+
+    pub fn clear_confirmation(&mut self) {
+        if self.confirmation.is_some() {
+            self.confirmation = None;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn active_confirmation_message(&mut self, now: Instant) -> Option<&'static str> {
+        match self.confirmation.as_ref() {
+            Some(ConfirmationState {
+                kind: ConfirmationKind::ExitApp,
+                until,
+            }) if now < *until => Some("Press B again to exit"),
+            Some(ConfirmationState {
+                kind: ConfirmationKind::RemoveFavorite { .. },
+                until,
+            }) if now < *until => Some("Press X again to remove favorite"),
+            Some(_) => {
+                self.confirmation = None;
+                self.render_dirty = true;
+                None
+            }
+            None => None,
         }
     }
 
@@ -149,6 +221,49 @@ impl AppState {
             self.playlist_count = count;
             self.render_dirty = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_confirmation_requires_two_presses_for_same_uri() {
+        let now = Instant::now();
+        let mut state = AppState::new();
+
+        assert!(!state.request_remove_confirmation("local:track-1", now));
+        assert_eq!(
+            state.active_confirmation_message(now),
+            Some("Press X again to remove favorite")
+        );
+        assert!(state.request_remove_confirmation("local:track-1", now));
+    }
+
+    #[test]
+    fn remove_confirmation_does_not_confirm_for_different_uri() {
+        let now = Instant::now();
+        let mut state = AppState::new();
+
+        assert!(!state.request_remove_confirmation("spotify:track:a", now));
+        assert!(!state.request_remove_confirmation("spotify:track:b", now));
+    }
+
+    #[test]
+    fn expired_confirmation_clears_itself() {
+        let mut state = AppState::new();
+        let now = Instant::now();
+        state.confirmation = Some(ConfirmationState {
+            kind: ConfirmationKind::ExitApp,
+            until: now,
+        });
+
+        assert_eq!(
+            state.active_confirmation_message(now + std::time::Duration::from_millis(1)),
+            None
+        );
+        assert!(state.confirmation.is_none());
     }
 }
 

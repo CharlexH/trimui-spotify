@@ -24,6 +24,7 @@ pub fn render_playlist_overlay(
     entries: &[FavoriteEntry],
     selected: usize,
     playing_uri: Option<&str>,
+    confirm_message: Option<&str>,
     fonts: &FontSet,
 ) {
     // Black background
@@ -203,7 +204,7 @@ pub fn render_playlist_overlay(
     }
 
     // Footer with control hints
-    let footer_style = playlist_footer_style();
+    let footer_style = playlist_footer_style_for(confirm_message);
     drawing::fill_rect(
         buf,
         PLAYLIST_X,
@@ -216,7 +217,7 @@ pub fn render_playlist_overlay(
         255,
     );
 
-    let hints = playlist_footer_hints();
+    let hints = confirm_message.unwrap_or(playlist_footer_hints());
     let hints_scale = if footer_style.use_small_font {
         fonts.scale_small
     } else {
@@ -316,9 +317,19 @@ fn playlist_footer_hints() -> &'static str {
 }
 
 fn playlist_footer_style() -> PlaylistFooterStyle {
+    playlist_footer_style_for(None)
+}
+
+fn playlist_footer_style_for(confirm_message: Option<&str>) -> PlaylistFooterStyle {
+    let color = if confirm_message.is_some() {
+        (255, 255, 255)
+    } else {
+        (0x3D, 0x3D, 0x3D)
+    };
+
     PlaylistFooterStyle {
         text_y: HINTS_BASELINE_Y,
-        color: (0x3D, 0x3D, 0x3D),
+        color,
         use_small_font: true,
     }
 }
@@ -425,5 +436,16 @@ mod tests {
             playlist_footer_divider_y(),
             SCREEN_H as i32 - PLAYLIST_MARGIN - 4 - PLAYLIST_FOOTER_HEIGHT + 12
         );
+    }
+
+    #[test]
+    fn playlist_confirmation_footer_uses_white_text() {
+        let normal = playlist_footer_style();
+        let confirm = playlist_footer_style_for(Some("Press X again to delete"));
+
+        assert_eq!(normal.color, (0x3D, 0x3D, 0x3D));
+        assert_eq!(confirm.color, (255, 255, 255));
+        assert_eq!(confirm.text_y, HINTS_BASELINE_Y);
+        assert!(confirm.use_small_font);
     }
 }

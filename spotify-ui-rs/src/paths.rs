@@ -6,6 +6,7 @@ pub struct AppPaths {
     pub app_dir: PathBuf,
     pub data_dir: PathBuf,
     pub resources_dir: PathBuf,
+    pub imports_dir: PathBuf,
     pub music_dir: PathBuf,
     pub favorites_path: PathBuf,
 }
@@ -54,6 +55,7 @@ fn detect_paths_with(overrides: PathOverrides) -> AppPaths {
         app_dir: app_dir.clone(),
         data_dir: data_dir.clone(),
         resources_dir,
+        imports_dir: data_dir.join("imports"),
         music_dir: data_dir.join("music"),
         favorites_path: data_dir.join("favorites.json"),
     }
@@ -115,6 +117,7 @@ mod tests {
         assert_eq!(paths.app_dir, PathBuf::from("/sdcard/Tools/tg5040/SideB.pak"));
         assert_eq!(paths.data_dir, PathBuf::from("/sdcard/Tools/tg5040/SideB.pak/data"));
         assert_eq!(paths.resources_dir, PathBuf::from("/sdcard/Tools/tg5040/SideB.pak/resources"));
+        assert_eq!(paths.imports_dir, PathBuf::from("/sdcard/Tools/tg5040/SideB.pak/data/imports"));
         assert_eq!(paths.music_dir, PathBuf::from("/sdcard/Tools/tg5040/SideB.pak/data/music"));
         assert_eq!(
             paths.favorites_path,
@@ -133,6 +136,7 @@ mod tests {
         assert_eq!(paths.app_dir, PathBuf::from("/apps/SideB"));
         assert_eq!(paths.data_dir, PathBuf::from("/mnt/userdata/sideb-data"));
         assert_eq!(paths.resources_dir, PathBuf::from("/mnt/userdata/sideb-assets"));
+        assert_eq!(paths.imports_dir, PathBuf::from("/mnt/userdata/sideb-data/imports"));
         assert_eq!(paths.music_dir, PathBuf::from("/mnt/userdata/sideb-data/music"));
         assert_eq!(
             paths.favorites_path,

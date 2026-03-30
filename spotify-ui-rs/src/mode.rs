@@ -31,6 +31,7 @@ pub enum InputAction {
     PlaylistDown,
     PlaylistSelect,
     PlaylistDelete,
+    LibraryChanged,
     SpotifyActivated,
     SpotifyDeactivated,
     SpotifyTrackChanged,

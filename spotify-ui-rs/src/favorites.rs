@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FavoriteSource {
+    #[default]
+    Spotify,
+    LocalImport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FavoriteEntry {
     pub uri: String,
@@ -9,6 +17,8 @@ pub struct FavoriteEntry {
     pub artist: String,
     pub album: String,
     pub cover_url: String,
+    #[serde(default)]
+    pub source: FavoriteSource,
     #[serde(default)]
     pub file_path: Option<String>,
     #[serde(default)]
@@ -87,11 +97,26 @@ impl FavoritesManager {
         self.save();
     }
 
+    /// Remove a favorite by URI without deleting associated files. Saves immediately.
+    /// Returns the removed entry if found.
+    pub fn remove_preserving_files(&mut self, uri: &str) -> Option<FavoriteEntry> {
+        let idx = self.entries.iter().position(|e| e.uri == uri)?;
+        let entry = self.entries.remove(idx);
+
+        eprintln!("favorites: removed {} - {}", entry.artist, entry.name);
+        self.save();
+        Some(entry)
+    }
+
     /// Remove a favorite by URI. Deletes associated files. Saves immediately.
     /// Returns the removed entry if found.
     pub fn remove(&mut self, uri: &str) -> Option<FavoriteEntry> {
-        let idx = self.entries.iter().position(|e| e.uri == uri)?;
-        let entry = self.entries.remove(idx);
+        let entry = self.remove_preserving_files(uri)?;
+        Self::delete_entry_files(&entry);
+        Some(entry)
+    }
+
+    pub fn delete_entry_files(entry: &FavoriteEntry) {
 
         // Delete MP3 file
         if let Some(ref fp) = entry.file_path {
@@ -108,10 +133,6 @@ impl FavoritesManager {
                 let _ = fs::remove_file(cp);
             }
         }
-
-        eprintln!("favorites: removed {} - {}", entry.artist, entry.name);
-        self.save();
-        Some(entry)
     }
 
     pub fn is_favorited(&self, uri: &str) -> bool {
@@ -174,5 +195,91 @@ impl FavoritesManager {
             }
         }
         files
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_entry(uri: &str, file_path: Option<String>, cover_path: Option<String>) -> FavoriteEntry {
+        FavoriteEntry {
+            uri: uri.to_string(),
+            name: "Track".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            cover_url: String::new(),
+            source: FavoriteSource::Spotify,
+            file_path,
+            cover_path,
+            duration_ms: None,
+            downloaded: true,
+            added_at: "0".to_string(),
+        }
+    }
+
+    fn unique_test_dir() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "sideb-favorites-test-{}-{unique}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn remove_preserving_files_keeps_managed_files_on_disk() {
+        let dir = unique_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let favorites_path = dir.join("favorites.json");
+        let mp3_path = dir.join("track.mp3");
+        let cover_path = dir.join("track.jpg");
+        fs::write(&mp3_path, b"mp3").unwrap();
+        fs::write(&cover_path, b"jpg").unwrap();
+
+        let mut favorites = FavoritesManager {
+            entries: vec![test_entry(
+                "track:1",
+                Some(mp3_path.to_string_lossy().to_string()),
+                Some(cover_path.to_string_lossy().to_string()),
+            )],
+            path: favorites_path,
+        };
+
+        let removed = favorites.remove_preserving_files("track:1");
+
+        assert!(removed.is_some());
+        assert!(mp3_path.exists());
+        assert!(cover_path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_entry_files_removes_existing_mp3_and_cover() {
+        let dir = unique_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let mp3_path = dir.join("track.mp3");
+        let cover_path = dir.join("track.jpg");
+        fs::write(&mp3_path, b"mp3").unwrap();
+        fs::write(&cover_path, b"jpg").unwrap();
+
+        let entry = test_entry(
+            "track:1",
+            Some(mp3_path.to_string_lossy().to_string()),
+            Some(cover_path.to_string_lossy().to_string()),
+        );
+
+        FavoritesManager::delete_entry_files(&entry);
+
+        assert!(!mp3_path.exists());
+        assert!(!cover_path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

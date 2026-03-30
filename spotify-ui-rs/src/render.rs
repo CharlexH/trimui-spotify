@@ -578,7 +578,7 @@ pub fn render_loop(
             let mut st = app_state.lock().unwrap();
             mode = st.mode;
             paused = st.paused;
-            dirty = st.render_dirty || st.exit_confirm_until.is_some();
+            dirty = st.render_dirty || st.confirmation.is_some();
             playlist_visible = st.playlist_visible;
 
             // Animate wheels when playing (Spotify or Local)
@@ -645,22 +645,12 @@ pub fn render_loop(
                 // Exit confirmation overlay on waiting screen
                 {
                     let mut st = app_state.lock().unwrap();
-                    let exit_active = match st.exit_confirm_until {
-                        Some(until) if std::time::Instant::now() < until => true,
-                        Some(_) => {
-                            st.exit_confirm_until = None;
-                            st.render_dirty = true;
-                            false
-                        }
-                        None => false,
-                    };
-                    if exit_active {
+                    if let Some(msg) = st.active_confirmation_message(std::time::Instant::now()) {
                         // Clear the status bar area (620–690), preserve "EXIT [B]" hint at 736
                         drawing::fill_rect(
                             back_buf, 0, 620,
                             SCREEN_W as i32, 70, 0, 0, 0, 255,
                         );
-                        let msg = "Press B again to exit";
                         let msg_w = fonts.measure_text(msg, fonts.scale_large);
                         let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
                         fonts.draw_text(
@@ -691,22 +681,9 @@ pub fn render_loop(
             {
                 let mut st = app_state.lock().unwrap();
                 let rs = render_state.lock().unwrap();
+                let confirmation_msg = st.active_confirmation_message(std::time::Instant::now());
 
-                // Check if exit confirmation is active
-                let exit_active = match st.exit_confirm_until {
-                    Some(until) if std::time::Instant::now() < until => true,
-                    Some(_) => {
-                        // Expired — clear it and mark dirty so bar redraws normally
-                        st.exit_confirm_until = None;
-                        st.render_dirty = true;
-                        false
-                    }
-                    None => false,
-                };
-
-                if exit_active {
-                    // Show centered exit confirmation message
-                    let msg = "Press B again to exit";
+                if let Some(msg) = confirmation_msg {
                     let msg_w = fonts.measure_text(msg, fonts.scale_large);
                     let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
                     fonts.draw_text(
@@ -822,9 +799,10 @@ fn render_playlist(
     favorites: &Arc<Mutex<FavoritesManager>>,
     fonts: &FontSet,
 ) {
-    let st = app_state.lock().unwrap();
+    let mut st = app_state.lock().unwrap();
     let selected = st.playlist_selected;
     let playing_uri = st.current_track_uri.clone();
+    let confirm_message = st.active_confirmation_message(Instant::now());
     drop(st);
 
     let fav = favorites.lock().unwrap();
@@ -836,7 +814,7 @@ fn render_playlist(
     } else {
         Some(playing_uri.as_str())
     };
-    playlist_view::render_playlist_overlay(buf, &entries, selected, uri_ref, fonts);
+    playlist_view::render_playlist_overlay(buf, &entries, selected, uri_ref, confirm_message, fonts);
 }
 
 #[cfg(test)]
