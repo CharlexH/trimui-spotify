@@ -2,7 +2,7 @@
   "name": "SideB",
   "version": "1.0.2",
   "type": "TOOL",
-  "description": "Spotify Connect receiver with offline favorites, local playback, and a cassette-tape UI",
+  "description": "Retro cassette-style player for TrimUI Brick with Spotify Connect, offline favorites, and local MP3 playback",
   "author": "CharlexH",
   "repo_url": "https://github.com/CharlexH/SideB",
   "release_filename": "SideB-{version}-nextui.zip",

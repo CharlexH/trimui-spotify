@@ -1,6 +1,6 @@
 # SideB
 
-Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with offline favorites, local playback, and a native fullscreen cassette-tape UI.
+SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
 ## Screenshots 📸
 
