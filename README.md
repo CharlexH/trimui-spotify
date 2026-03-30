@@ -2,25 +2,52 @@
 
 Turn a [TrimUI Brick](https://trimui.com) into a Spotify Connect receiver with offline favorites, local playback, and a native fullscreen cassette-tape UI.
 
-## Features
+## Screenshots 📸
 
-### Spotify Connect Streaming
+<table>
+  <tr>
+    <td align="center">
+      <img src="screenshots/spotify_connecting.png" alt="Spotify connecting screen" width="360"><br>
+      <strong>Spotify connecting</strong>
+    </td>
+    <td align="center">
+      <img src="screenshots/favlist.png" alt="Favorites list" width="360"><br>
+      <strong>FAV LIST</strong>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="screenshots/offline_playing.png" alt="Offline local playback" width="360"><br>
+      <strong>Offline playback</strong>
+    </td>
+    <td align="center">
+      <img src="screenshots/waiting.png" alt="Waiting screen" width="360"><br>
+      <strong>Waiting screen</strong>
+    </td>
+  </tr>
+</table>
 
-- Appears as a Spotify Connect device on your local network
-- Streams audio from any Spotify client (phone, desktop, web)
-- Renders cover art, playback state, and cassette animation directly to `/dev/fb0`
-- Hardware button controls for play, pause, skip, volume, and favorites
-- Runs without SDL, X11, or a desktop environment
+## Features ✨
 
-### Offline Favorites
+### Spotify streaming 🎧
 
-- Mark any playing track as a favorite (press X)
-- Browse and manage favorites in a full-screen playlist overlay (press Y)
-- Cached favorites can be played back locally when Wi-Fi is unavailable
-- Shuffle playback with prev/next track navigation
-- Drop local MP3 files into `data/imports/` and SideB will auto-import them into `FAV LIST`
+- Turns the TrimUI Brick into a Spotify Connect receiver on your local network
+- Shows cover art, playback state, and cassette animation directly on `/dev/fb0`
+- Supports hardware controls for play, pause, skip, volume, favorites, and list navigation
 
-## How It Works
+### Offline FAV list 💾
+
+- Save the current track with `X`
+- Browse and manage favorites in the fullscreen `FAV LIST`
+- Play downloaded favorites locally with shuffle, previous, and next track controls
+
+### Local uploads 📥
+
+- Drop MP3 files into `data/imports/`
+- SideB imports tags and cover art automatically
+- Imported tracks are added to `FAV LIST` and behave like local favorites
+
+## How It Works 🧠
 
 The app consists of two components:
 
@@ -35,7 +62,7 @@ For manual local playback, users can also drop MP3 files into `data/imports/`. S
 
 **Important**: The app does **not** intercept, decrypt, or extract audio from Spotify streams. Spotify playback and offline caching use entirely separate audio paths.
 
-## Offline Playback & Legal Notice
+## Offline Playback & Legal Notice ⚠️
 
 This project provides an offline caching mechanism strictly for **personal, non-commercial use**. By using this feature, you acknowledge and agree to the following:
 
@@ -46,14 +73,14 @@ This project provides an offline caching mechanism strictly for **personal, non-
 
 This software is provided as-is for educational and personal use. It is not intended to promote or facilitate unauthorized copying or distribution of copyrighted material.
 
-## Requirements
+## Requirements ✅
 
 - TrimUI Brick
 - NextUI, Stock OS, or [CrossMix OS](https://github.com/cizia64/CrossMix-OS) `1.1.1+`
 - Spotify Premium account
 - Wi-Fi on the same network as your Spotify client (for streaming mode)
 
-## Controls
+## Controls 🎮
 
 | Button | Action |
 |--------|--------|
@@ -64,16 +91,23 @@ This software is provided as-is for educational and personal use. It is not inte
 | **Y** | Open / close playlist |
 | **B** / **MENU** | Exit app |
 
-## Local Playback Usage
+## Usage 🚀
 
-### Spotify favorites
+### Spotify streaming
+
+1. Launch **SideB** from the TrimUI app menu.
+2. Open Spotify on your phone, desktop, or tablet.
+3. Pick **TrimUI Brick** from Spotify Connect.
+4. Use the hardware buttons on the device for playback, volume, favorites, and list access.
+
+### Offline FAV list
 
 1. Start playback from Spotify Connect.
 2. Press **X** to add the current track to favorites.
 3. Wait for the background download to finish.
 4. Press **A** on the device to start local playback from the downloaded library, or press **Y** to pick a downloaded track from `FAV LIST`.
 
-### Import your own MP3 files
+### Local uploads
 
 Copy `.mp3` files into the `data/imports/` folder inside the app directory:
 
@@ -92,7 +126,7 @@ Notes:
 - Press **X** once to show the remove confirmation, then press **X** again to actually remove the track from favorites.
 - If you remove the track that is currently playing locally, SideB keeps the managed file until playback moves away from that track. If you favorite it again before switching tracks, the cached file is preserved.
 
-## Build
+## Build 🔧
 
 ### Rust UI (current)
 
@@ -111,7 +145,7 @@ cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 - `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
 - `package/SideB.pak/resources/font_mono.ttf` — UI font
 
-## Package Releases
+## Package Releases 📦
 
 Build all release archives:
 
@@ -137,7 +171,7 @@ Supported in this release:
 - `Stock` — package layout and launcher verified
 - `CrossMix` — package layout and launcher verified
 
-## Deploy
+## Deploy 🚀
 
 Manual install paths:
 
@@ -149,7 +183,7 @@ CrossMix -> /mnt/SDCARD/Apps/SideB/
 
 Launch **SideB** from the TrimUI app menu, then select **TrimUI Brick** from Spotify Connect on another device.
 
-## GitHub Release
+## GitHub Release 🏷️
 
 Public releases attach three installable archives:
 
@@ -159,7 +193,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-## Repo Layout
+## Repo Layout 🗂️
 
 ```text
 spotify-ui-rs/                  Rust UI source
@@ -170,7 +204,7 @@ packaging/                      Platform wrappers and release metadata
 scripts/package.sh              Multi-platform release packager
 ```
 
-## Configuration
+## Configuration ⚙️
 
 Main config: [`package/SideB.pak/data/config.yml`](package/SideB.pak/data/config.yml)
 
@@ -187,7 +221,7 @@ zeroconf_enabled: true
 
 The UI communicates with `go-librespot` at `http://127.0.0.1:3678`.
 
-## Credits & Third-Party Software
+## Credits & Third-Party Software 🙏
 
 This project builds upon the following open-source projects:
 
@@ -208,10 +242,10 @@ Release archives also include:
 
 Before publishing a GitHub release, record the exact upstream versions and checksums of the bundled third-party binaries in `LICENSES/THIRD_PARTY_SOURCES.md`.
 
-## License
+## License 📄
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-## Disclaimer
+## Disclaimer ⚖️
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. THE AUTHORS ARE NOT RESPONSIBLE FOR ANY MISUSE OF THIS SOFTWARE OR FOR ANY VIOLATION OF THIRD-PARTY TERMS OF SERVICE OR APPLICABLE LAWS. USE AT YOUR OWN RISK.
