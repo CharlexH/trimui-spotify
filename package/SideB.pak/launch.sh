@@ -29,7 +29,7 @@ chmod +x /tmp/go-librespot /tmp/sideb
 
 # Copy yt-dlp and the bundled audio transcoder if present
 [ -f "$progdir/yt-dlp" ] && cp "$progdir/yt-dlp" /tmp/yt-dlp && chmod +x /tmp/yt-dlp
-[ -f "$progdir/ffmpeg-full" ] && cp "$progdir/ffmpeg-full" /tmp/ffmpeg-full && chmod +x /tmp/ffmpeg-full
+[ -f "$progdir/ffmpeg-lite" ] && cp "$progdir/ffmpeg-lite" /tmp/ffmpeg-lite && chmod +x /tmp/ffmpeg-lite
 
 # Start go-librespot backend
 mkdir -p "$SIDEB_DATA_DIR"

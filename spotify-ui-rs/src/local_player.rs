@@ -76,17 +76,38 @@ impl LocalPlayer {
             let file_path = match entry.file_path {
                 Some(ref fp) => fp.clone(),
                 None => {
-                    eprintln!("local_player: no file_path for {}, skipping", entry.name);
+                    eprintln!(
+                        "local_player: skip idx={}/{} uri={} track={} - {} reason=no file_path",
+                        idx + 1,
+                        self.playlist.len(),
+                        entry.uri,
+                        entry.artist,
+                        entry.name
+                    );
                     continue;
                 }
             };
 
             if !std::path::Path::new(&file_path).exists() {
-                eprintln!("local_player: file not found: {}, skipping", file_path);
+                eprintln!(
+                    "local_player: skip idx={}/{} uri={} path={} reason=file missing",
+                    idx + 1,
+                    self.playlist.len(),
+                    entry.uri,
+                    file_path
+                );
                 continue;
             }
 
-            eprintln!("local_player: playing {} - {}", entry.artist, entry.name);
+            eprintln!(
+                "local_player: starting idx={}/{} uri={} track={} - {} path={}",
+                idx + 1,
+                self.playlist.len(),
+                entry.uri,
+                entry.artist,
+                entry.name,
+                file_path
+            );
 
             match spawn_pipeline(&file_path) {
                 Ok((ffmpeg, aplay)) => {
@@ -97,16 +118,32 @@ impl LocalPlayer {
                     self.start_time = Instant::now();
                     self.paused = false;
                     self.paused_elapsed = Duration::ZERO;
+                    eprintln!(
+                        "local_player: pipeline ready uri={} ffmpeg_pid={} aplay_pid={}",
+                        self.current_entry.as_ref().map(|entry| entry.uri.as_str()).unwrap_or("unknown"),
+                        self.ffmpeg_child.as_ref().map(|child| child.id()).unwrap_or_default(),
+                        self.aplay_child.as_ref().map(|child| child.id()).unwrap_or_default()
+                    );
                     return;
                 }
                 Err(e) => {
-                    eprintln!("local_player: spawn error for {}: {e}", entry.name);
+                    eprintln!(
+                        "local_player: spawn error idx={}/{} uri={} track={} - {} error={e}",
+                        idx + 1,
+                        self.playlist.len(),
+                        entry.uri,
+                        entry.artist,
+                        entry.name
+                    );
                     continue;
                 }
             }
         }
 
-        eprintln!("local_player: no playable track found in playlist");
+        eprintln!(
+            "local_player: no playable track found in playlist size={}",
+            self.playlist.len()
+        );
     }
 
     /// Play a specific entry (for playlist selection).
@@ -129,7 +166,10 @@ impl LocalPlayer {
         self.paused_elapsed += self.start_time.elapsed();
         send_signal(&self.ffmpeg_child, libc::SIGSTOP);
         send_signal(&self.aplay_child, libc::SIGSTOP);
-        eprintln!("local_player: paused");
+        eprintln!(
+            "local_player: paused track={}",
+            current_track_label(self.current_entry.as_ref())
+        );
     }
 
     pub fn resume(&mut self) {
@@ -140,7 +180,10 @@ impl LocalPlayer {
         send_signal(&self.aplay_child, libc::SIGCONT);
         self.paused = false;
         self.start_time = Instant::now();
-        eprintln!("local_player: resumed");
+        eprintln!(
+            "local_player: resumed track={}",
+            current_track_label(self.current_entry.as_ref())
+        );
     }
 
     pub fn toggle_pause(&mut self) {
@@ -152,11 +195,12 @@ impl LocalPlayer {
     }
 
     pub fn stop(&mut self) {
+        let stopped_track = current_track_label(self.current_entry.as_ref());
         self.stop_subprocess();
         self.current_entry = None;
         self.playlist.clear();
         self.playlist_index = 0;
-        eprintln!("local_player: stopped");
+        eprintln!("local_player: stopped track={stopped_track}");
     }
 
     /// Refresh the playlist with newly downloaded entries while preserving current position.
@@ -228,6 +272,10 @@ impl LocalPlayer {
             return false;
         }
         if self.is_finished() {
+            eprintln!(
+                "local_player: track finished track={} advancing",
+                current_track_label(self.current_entry.as_ref())
+            );
             self.next();
             return true;
         }
@@ -290,7 +338,8 @@ impl Drop for LocalPlayer {
 }
 
 /// Spawn the ffmpeg → aplay pipeline for a given audio file.
-fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), Box<dyn std::error::Error>> {
+fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), String> {
+    eprintln!("local_player: launching ffmpeg -> aplay for {}", file_path);
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
             "-i",
@@ -308,21 +357,38 @@ fn spawn_pipeline(file_path: &str) -> Result<(Child, Child), Box<dyn std::error:
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    eprintln!("local_player: ffmpeg started pid={}", ffmpeg.id());
 
     let ffmpeg_stdout = ffmpeg
         .stdout
         .take()
-        .ok_or("failed to capture ffmpeg stdout")?;
+        .ok_or_else(|| "ffmpeg stdout pipe missing".to_string())?;
 
-    let aplay = Command::new("aplay")
+    let aplay = match Command::new("aplay")
         .args(["-f", "S16_LE", "-r", "44100", "-c", "2", "-q"])
         .stdin(ffmpeg_stdout)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+    {
+        Ok(aplay) => aplay,
+        Err(e) => {
+            let _ = ffmpeg.kill();
+            let _ = ffmpeg.wait();
+            return Err(format!("aplay spawn failed: {e}"));
+        }
+    };
+    eprintln!("local_player: aplay started pid={}", aplay.id());
 
     Ok((ffmpeg, aplay))
+}
+
+fn current_track_label(entry: Option<&FavoriteEntry>) -> String {
+    entry
+        .map(|entry| format!("{} - {}", entry.artist, entry.name))
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// Send a signal to a child process.

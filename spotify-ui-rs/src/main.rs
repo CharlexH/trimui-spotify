@@ -12,6 +12,7 @@ mod image_ops;
 mod input;
 mod local_import;
 mod local_player;
+mod log_utils;
 mod mode;
 mod network;
 mod paths;
@@ -36,6 +37,12 @@ use local_player::LocalPlayer;
 use mode::{AppMode, InputAction};
 use paths::{app_paths, detect_paths, init_paths};
 use render::RenderState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistMove {
+    Up,
+    Down,
+}
 
 fn main() {
     eprintln!("sideb starting");
@@ -541,19 +548,19 @@ fn command_processor(
 
             InputAction::PlaylistUp => {
                 let mut st = app_state.lock().unwrap();
-                if st.playlist_selected > 0 {
-                    let new_sel = st.playlist_selected - 1;
-                    st.set_playlist_selected(new_sel);
-                }
+                let new_sel =
+                    advance_playlist_selection(st.playlist_selected, st.playlist_count, PlaylistMove::Up);
+                st.set_playlist_selected(new_sel);
             }
 
             InputAction::PlaylistDown => {
                 let mut st = app_state.lock().unwrap();
-                let count = st.playlist_count;
-                if count > 0 && st.playlist_selected < count - 1 {
-                    let new_sel = st.playlist_selected + 1;
-                    st.set_playlist_selected(new_sel);
-                }
+                let new_sel = advance_playlist_selection(
+                    st.playlist_selected,
+                    st.playlist_count,
+                    PlaylistMove::Down,
+                );
+                st.set_playlist_selected(new_sel);
             }
 
             InputAction::PlaylistSelect => {
@@ -708,6 +715,29 @@ fn command_processor(
             &favorites,
             current_local_uri.as_deref(),
         );
+    }
+}
+
+fn advance_playlist_selection(selected: usize, count: usize, movement: PlaylistMove) -> usize {
+    if count == 0 {
+        return 0;
+    }
+
+    match movement {
+        PlaylistMove::Up => {
+            if selected == 0 {
+                count - 1
+            } else {
+                selected - 1
+            }
+        }
+        PlaylistMove::Down => {
+            if selected + 1 >= count {
+                0
+            } else {
+                selected + 1
+            }
+        }
     }
 }
 
@@ -1022,5 +1052,21 @@ mod tests {
             ready_with_no_current,
             vec!["track:1".to_string(), "track:2".to_string()]
         );
+    }
+
+    #[test]
+    fn playlist_selection_wraps_up_from_first_item() {
+        assert_eq!(advance_playlist_selection(0, 4, PlaylistMove::Up), 3);
+    }
+
+    #[test]
+    fn playlist_selection_wraps_down_from_last_item() {
+        assert_eq!(advance_playlist_selection(3, 4, PlaylistMove::Down), 0);
+    }
+
+    #[test]
+    fn playlist_selection_stays_zero_when_list_is_empty() {
+        assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Up), 0);
+        assert_eq!(advance_playlist_selection(0, 0, PlaylistMove::Down), 0);
     }
 }

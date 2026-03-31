@@ -140,7 +140,7 @@ cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 ### Required runtime files (not tracked in git)
 
 - `package/SideB.pak/go-librespot` — Spotify Connect backend binary
-- `package/SideB.pak/ffmpeg-full` — bundled FFmpeg-compatible audio transcoder with MP3 encoder support; a minimal audio-focused build is sufficient
+- `package/SideB.pak/ffmpeg-lite` — bundled FFmpeg-compatible audio transcoder with MP3 encoder support; a minimal audio-focused build is sufficient
 - `package/SideB.pak/yt-dlp` — YouTube audio downloader (aarch64 binary)
 - `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
 - `package/SideB.pak/resources/font_mono.ttf` — UI font

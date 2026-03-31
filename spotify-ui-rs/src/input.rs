@@ -11,6 +11,22 @@ use crate::mode::{AppMode, InputAction};
 use crate::network;
 use crate::types::InputEvent;
 
+const PLAYLIST_REPEAT_DELAY_MS: u64 = 300;
+const PLAYLIST_REPEAT_INTERVAL_MS: u64 = 120;
+const PLAYLIST_REPEAT_POLL_MS: u64 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistRepeatDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Default)]
+struct PlaylistRepeatState {
+    held_direction: Option<PlaylistRepeatDirection>,
+    next_repeat_at: Option<Instant>,
+}
+
 /// Parse a raw 24-byte Linux input_event struct (aarch64 layout).
 /// Layout: timeval (16 bytes) + type (u16) + code (u16) + value (i32)
 fn parse_input_event(buf: &[u8; 24]) -> InputEvent {
@@ -49,6 +65,15 @@ fn read_input_device(
     quit: Arc<AtomicBool>,
     cmd_tx: Sender<InputAction>,
 ) {
+    let playlist_repeat = Arc::new(Mutex::new(PlaylistRepeatState::default()));
+    let repeat_state = Arc::clone(&playlist_repeat);
+    let repeat_state_ref = Arc::clone(&state);
+    let repeat_quit = Arc::clone(&quit);
+    let repeat_cmd_tx = cmd_tx.clone();
+    let _repeat_handle = std::thread::spawn(move || {
+        playlist_repeat_loop(repeat_state_ref, repeat_quit, repeat_cmd_tx, repeat_state);
+    });
+
     // Retry open up to 5 times
     let mut file = None;
     for attempt in 1..=5 {
@@ -111,10 +136,28 @@ fn read_input_device(
 
         // Route based on whether playlist overlay is visible
         if playlist_visible {
-            handle_playlist_input(&ev, &cmd_tx, &quit);
+            handle_playlist_input(&ev, &cmd_tx, &playlist_repeat);
         } else {
+            playlist_repeat.lock().unwrap().clear();
             handle_normal_input(&ev, mode, &state, &cmd_tx, &quit);
         }
+    }
+}
+
+fn playlist_repeat_loop(
+    state: Arc<Mutex<AppState>>,
+    quit: Arc<AtomicBool>,
+    cmd_tx: Sender<InputAction>,
+    repeat_state: Arc<Mutex<PlaylistRepeatState>>,
+) {
+    while !quit.load(Ordering::Relaxed) {
+        let playlist_visible = state.lock().unwrap().playlist_visible;
+        let now = Instant::now();
+        let action = repeat_state.lock().unwrap().due_action(playlist_visible, now);
+        if let Some(action) = action {
+            let _ = cmd_tx.send(action);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(PLAYLIST_REPEAT_POLL_MS));
     }
 }
 
@@ -122,20 +165,24 @@ fn read_input_device(
 fn handle_playlist_input(
     ev: &InputEvent,
     cmd_tx: &Sender<InputAction>,
-    _quit: &Arc<AtomicBool>,
+    repeat_state: &Arc<Mutex<PlaylistRepeatState>>,
 ) {
     if ev.event_type == EV_KEY {
         match ev.code {
             BTN_B => {
+                repeat_state.lock().unwrap().clear();
                 let _ = cmd_tx.send(InputAction::TogglePlaylist);
             }
             BTN_A => {
+                repeat_state.lock().unwrap().clear();
                 let _ = cmd_tx.send(InputAction::PlaylistSelect);
             }
             BTN_X => {
+                repeat_state.lock().unwrap().clear();
                 let _ = cmd_tx.send(InputAction::PlaylistDelete);
             }
             BTN_Y => {
+                repeat_state.lock().unwrap().clear();
                 let _ = cmd_tx.send(InputAction::TogglePlaylist);
             }
             _ => {}
@@ -143,10 +190,12 @@ fn handle_playlist_input(
     } else if ev.event_type == EV_ABS {
         match ev.code {
             ABS_HAT0Y => {
-                if ev.value < 0 {
-                    let _ = cmd_tx.send(InputAction::PlaylistUp);
-                } else if ev.value > 0 {
-                    let _ = cmd_tx.send(InputAction::PlaylistDown);
+                let action = repeat_state
+                    .lock()
+                    .unwrap()
+                    .on_axis_value(ev.value, Instant::now());
+                if let Some(action) = action {
+                    let _ = cmd_tx.send(action);
                 }
             }
             _ => {}
@@ -257,5 +306,112 @@ fn handle_normal_input(
             }
             _ => {}
         }
+    }
+}
+
+impl PlaylistRepeatDirection {
+    fn from_axis_value(value: i32) -> Option<Self> {
+        if value < 0 {
+            Some(Self::Up)
+        } else if value > 0 {
+            Some(Self::Down)
+        } else {
+            None
+        }
+    }
+
+    fn action(self) -> InputAction {
+        match self {
+            Self::Up => InputAction::PlaylistUp,
+            Self::Down => InputAction::PlaylistDown,
+        }
+    }
+}
+
+impl PlaylistRepeatState {
+    fn on_axis_value(&mut self, value: i32, now: Instant) -> Option<InputAction> {
+        let Some(direction) = PlaylistRepeatDirection::from_axis_value(value) else {
+            self.clear();
+            return None;
+        };
+
+        if self.held_direction == Some(direction) {
+            return None;
+        }
+
+        self.held_direction = Some(direction);
+        self.next_repeat_at =
+            Some(now + std::time::Duration::from_millis(PLAYLIST_REPEAT_DELAY_MS));
+        Some(direction.action())
+    }
+
+    fn due_action(&mut self, playlist_visible: bool, now: Instant) -> Option<InputAction> {
+        if !playlist_visible {
+            self.clear();
+            return None;
+        }
+
+        let direction = self.held_direction?;
+        let next_repeat_at = self.next_repeat_at?;
+        if now < next_repeat_at {
+            return None;
+        }
+
+        self.next_repeat_at =
+            Some(now + std::time::Duration::from_millis(PLAYLIST_REPEAT_INTERVAL_MS));
+        Some(direction.action())
+    }
+
+    fn clear(&mut self) {
+        self.held_direction = None;
+        self.next_repeat_at = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn playlist_repeat_starts_immediately_then_waits_for_delay() {
+        let now = Instant::now();
+        let mut repeat = PlaylistRepeatState::default();
+
+        assert_eq!(
+            repeat.on_axis_value(-1, now),
+            Some(InputAction::PlaylistUp)
+        );
+        assert_eq!(repeat.due_action(true, now + Duration::from_millis(299)), None);
+        assert_eq!(
+            repeat.due_action(true, now + Duration::from_millis(300)),
+            Some(InputAction::PlaylistUp)
+        );
+    }
+
+    #[test]
+    fn playlist_repeat_continues_at_repeat_interval() {
+        let now = Instant::now();
+        let mut repeat = PlaylistRepeatState::default();
+        let _ = repeat.on_axis_value(1, now);
+
+        assert_eq!(
+            repeat.due_action(true, now + Duration::from_millis(300)),
+            Some(InputAction::PlaylistDown)
+        );
+        assert_eq!(repeat.due_action(true, now + Duration::from_millis(419)), None);
+        assert_eq!(
+            repeat.due_action(true, now + Duration::from_millis(420)),
+            Some(InputAction::PlaylistDown)
+        );
+    }
+
+    #[test]
+    fn playlist_repeat_release_stops_further_repeats() {
+        let now = Instant::now();
+        let mut repeat = PlaylistRepeatState::default();
+        let _ = repeat.on_axis_value(-1, now);
+        assert_eq!(repeat.on_axis_value(0, now + Duration::from_millis(50)), None);
+        assert_eq!(repeat.due_action(true, now + Duration::from_millis(400)), None);
     }
 }

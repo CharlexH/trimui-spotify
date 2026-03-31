@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -6,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::{FFMPEG_TRANSCODER_BIN, YTDLP_BIN};
 use crate::favorites::FavoritesManager;
+use crate::log_utils::{exit_status_label, format_bytes, summarize_command_output};
 use crate::paths::app_paths;
 
 const MAX_RETRIES: u32 = 1;
@@ -51,10 +53,22 @@ impl DownloadManager {
             return;
         }
         pending.insert(request.uri.clone());
+        let pending_count = pending.len();
         drop(pending);
 
+        let uri = request.uri.clone();
+        let artist_name = request.artist_name.clone();
+        let track_name = request.track_name.clone();
         if let Err(e) = self.tx.send(request) {
             eprintln!("download: enqueue failed: {e}");
+        } else {
+            eprintln!(
+                "download: queued uri={} track={} - {} pending={}",
+                uri,
+                artist_name,
+                track_name,
+                pending_count
+            );
         }
     }
 }
@@ -79,8 +93,8 @@ fn download_loop(
 ) {
     for req in rx.iter() {
         eprintln!(
-            "download: starting {} - {}",
-            req.artist_name, req.track_name
+            "download: starting uri={} track={} - {}",
+            req.uri, req.artist_name, req.track_name
         );
 
         // Check if still favorited (user may have unfavorited while queued)
@@ -108,6 +122,12 @@ fn download_loop(
         let base_name = format!("{} - {}", safe_artist, safe_track);
         let output_path = music_dir.join(format!("{}.mp3", base_name));
         let cover_path = music_dir.join(format!("{}.jpg", base_name));
+        eprintln!(
+            "download: target uri={} mp3={} cover={}",
+            req.uri,
+            output_path.display(),
+            cover_path.display()
+        );
 
         // Clean up partial file from previous failed attempt
         if output_path.exists() {
@@ -139,6 +159,16 @@ fn download_loop(
                 }
             }
 
+            eprintln!(
+                "download: launching yt-dlp attempt={}/{} uri={} query={} output={} ytdlp={} ffmpeg={}",
+                attempt + 1,
+                MAX_RETRIES + 1,
+                req.uri,
+                search_query,
+                output_path.display(),
+                YTDLP_BIN,
+                FFMPEG_TRANSCODER_BIN
+            );
             let result = Command::new(YTDLP_BIN)
                 .args([
                     "-x",
@@ -161,11 +191,13 @@ fn download_loop(
                     break;
                 }
                 Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
                     eprintln!(
-                        "download: yt-dlp failed (attempt {}): {}",
+                        "download: yt-dlp failed attempt={}/{} uri={} status={} stderr={}",
                         attempt + 1,
-                        stderr.lines().last().unwrap_or("")
+                        MAX_RETRIES + 1,
+                        req.uri,
+                        exit_status_label(&output.status),
+                        summarize_command_output(&output.stderr)
                     );
                     // Clean up partial file before retry
                     if output_path.exists() {
@@ -180,28 +212,55 @@ fn download_loop(
         }
 
         if success {
-            eprintln!("download: success: {}", output_path.display());
+            let size = fs::metadata(&output_path)
+                .map(|meta| format_bytes(meta.len()))
+                .unwrap_or_else(|_| "unknown".to_string());
+            eprintln!(
+                "download: success uri={} mp3={} size={}",
+                req.uri,
+                output_path.display(),
+                size
+            );
 
             let duration_ms = probe_duration(&output_path);
 
             let mut fav = favorites.lock().unwrap();
             fav.mark_downloaded(&req.uri, &output_path.to_string_lossy(), duration_ms);
+            eprintln!(
+                "download: library updated uri={} duration_ms={:?}",
+                req.uri, duration_ms
+            );
 
-            download_cover(&req.cover_url, &cover_path);
+            let cover_downloaded = download_cover(&req.cover_url, &cover_path);
             if !cover_path.exists() && !req.cover_url.is_empty() {
-                try_copy_from_cover_cache(&req.cover_url, &cover_path);
+                let copied = try_copy_from_cover_cache(&req.cover_url, &cover_path);
+                if !cover_downloaded && !copied {
+                    eprintln!("download: cover unavailable uri={}", req.uri);
+                }
+            } else if req.cover_url.is_empty() {
+                eprintln!("download: no cover url for uri={}", req.uri);
             }
             if cover_path.exists() {
                 fav.set_cover_path(&req.uri, &cover_path.to_string_lossy());
+                eprintln!(
+                    "download: cover ready uri={} path={}",
+                    req.uri,
+                    cover_path.display()
+                );
             }
         } else {
             // All attempts failed — clean up any partial file
             if output_path.exists() {
                 let _ = std::fs::remove_file(&output_path);
+                eprintln!(
+                    "download: removed failed partial uri={} path={}",
+                    req.uri,
+                    output_path.display()
+                );
             }
             eprintln!(
-                "download: giving up on {} - {}",
-                req.artist_name, req.track_name
+                "download: giving up uri={} track={} - {}",
+                req.uri, req.artist_name, req.track_name
             );
         }
 
@@ -211,7 +270,7 @@ fn download_loop(
 
 /// Use ffprobe to get track duration in milliseconds.
 fn probe_duration(path: &Path) -> Option<i64> {
-    let output = Command::new("ffprobe")
+    let output = match Command::new("ffprobe")
         .args([
             "-v",
             "quiet",
@@ -222,21 +281,49 @@ fn probe_duration(path: &Path) -> Option<i64> {
         ])
         .arg(path)
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("download: ffprobe launch failed for {}: {e}", path.display());
+            return None;
+        }
+    };
 
     if !output.status.success() {
+        eprintln!(
+            "download: ffprobe failed for {} status={} stderr={}",
+            path.display(),
+            exit_status_label(&output.status),
+            summarize_command_output(&output.stderr)
+        );
         return None;
     }
 
     let s = String::from_utf8_lossy(&output.stdout);
-    let secs: f64 = s.trim().parse().ok()?;
-    Some((secs * 1000.0) as i64)
+    let secs: f64 = match s.trim().parse() {
+        Ok(secs) => secs,
+        Err(_) => {
+            eprintln!(
+                "download: ffprobe parse failed for {} stdout={}",
+                path.display(),
+                summarize_command_output(&output.stdout)
+            );
+            return None;
+        }
+    };
+    let duration_ms = (secs * 1000.0) as i64;
+    eprintln!(
+        "download: ffprobe duration={}ms file={}",
+        duration_ms,
+        path.display()
+    );
+    Some(duration_ms)
 }
 
 /// Download cover art via curl (HTTPS support).
-fn download_cover(url: &str, dest: &Path) {
+fn download_cover(url: &str, dest: &Path) -> bool {
     if url.is_empty() {
-        return;
+        return false;
     }
 
     // Use the existing cert file path
@@ -253,18 +340,28 @@ fn download_cover(url: &str, dest: &Path) {
     match cmd.output() {
         Ok(output) => {
             if !output.status.success() {
-                eprintln!("download: cover fetch failed for {}", url);
+                eprintln!(
+                    "download: cover fetch failed url={} status={} stderr={}",
+                    url,
+                    exit_status_label(&output.status),
+                    summarize_command_output(&output.stderr)
+                );
+                false
+            } else {
+                eprintln!("download: cover fetched url={} dest={}", url, dest.display());
+                true
             }
         }
         Err(e) => {
             eprintln!("download: curl error: {e}");
+            false
         }
     }
 }
 
 /// Try to copy cover art from Spotify's local cover cache.
 /// The cache stores original JPEG bytes keyed by FNV hash of the URL.
-fn try_copy_from_cover_cache(url: &str, dest: &Path) {
+fn try_copy_from_cover_cache(url: &str, dest: &Path) -> bool {
     // Replicate the same FNV hash used in network.rs
     let mut hash = 0xcbf29ce484222325u64;
     for &byte in url.as_bytes() {
@@ -275,8 +372,20 @@ fn try_copy_from_cover_cache(url: &str, dest: &Path) {
 
     if cache_path.exists() {
         match std::fs::copy(&cache_path, dest) {
-            Ok(_) => eprintln!("download: cover copied from cache {}", cache_path.display()),
-            Err(e) => eprintln!("download: cache copy failed: {e}"),
+            Ok(_) => {
+                eprintln!(
+                    "download: cover copied from cache {} -> {}",
+                    cache_path.display(),
+                    dest.display()
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("download: cache copy failed: {e}");
+                false
+            }
         }
+    } else {
+        false
     }
 }

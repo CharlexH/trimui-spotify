@@ -14,7 +14,7 @@ go-librespot_linux_arm64.tar.gz
 package/SideB.pak/go-librespot
 package/SideB.pak/sideb
 package/SideB.pak/yt-dlp
-package/SideB.pak/ffmpeg-full
+package/SideB.pak/ffmpeg-lite
 
 # Large resource files (see README for download instructions)
 package/SideB.pak/resources/font.ttf

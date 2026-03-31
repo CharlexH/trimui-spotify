@@ -16,7 +16,7 @@ impl Default for AppMode {
 }
 
 /// Actions dispatched from input/network threads to the command processor.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAction {
     ToggleFavorite,
     TogglePlayPause,

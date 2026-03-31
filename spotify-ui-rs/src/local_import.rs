@@ -23,6 +23,12 @@ struct ImportMetadata {
     duration_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataSource {
+    Ffprobe,
+    Filename,
+}
+
 #[derive(Debug, Deserialize)]
 struct FfprobeFormat {
     #[serde(default)]
@@ -61,7 +67,7 @@ pub fn scan_once(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
         }
     };
 
-    let mut imported = 0usize;
+    let mut import_candidates = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let is_mp3 = path
@@ -73,6 +79,19 @@ pub fn scan_once(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
             continue;
         }
 
+        import_candidates.push(path);
+    }
+
+    if !import_candidates.is_empty() {
+        eprintln!(
+            "import: found {} candidate mp3 file(s) in {}",
+            import_candidates.len(),
+            imports_dir.display()
+        );
+    }
+
+    let mut imported = 0usize;
+    for path in import_candidates {
         match import_one(&path, &music_dir) {
             Ok(entry) => {
                 favorites.lock().unwrap().add(entry);
@@ -110,27 +129,51 @@ pub fn run(
 }
 
 fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, String> {
+    eprintln!("import: processing {}", import_mp3.display());
     let source_stem = import_mp3
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("Imported Track");
-    let metadata = probe_metadata(import_mp3).unwrap_or_else(|| metadata_from_filename(source_stem));
+    let (metadata, metadata_source) = resolve_metadata(import_mp3, source_stem);
+    eprintln!(
+        "import: metadata source={} artist={} title={} duration_ms={:?}",
+        metadata_source.label(),
+        metadata.artist,
+        metadata.title,
+        metadata.duration_ms
+    );
 
     let base_name = sanitize_filename(&format!("{} - {}", metadata.artist, metadata.title));
     let target_mp3 = unique_target_path(music_dir, &base_name, "mp3");
     fs::rename(import_mp3, &target_mp3)
         .map_err(|e| format!("move to {} failed: {e}", target_mp3.display()))?;
+    eprintln!(
+        "import: moved {} -> {}",
+        import_mp3.display(),
+        target_mp3.display()
+    );
 
     let import_sidecar = find_sidecar_cover(import_mp3);
     let embedded_cover_target = target_mp3.with_extension("jpg");
     let used_embedded_cover = extract_embedded_cover(&target_mp3, &embedded_cover_target);
     let cover_path = if used_embedded_cover {
+        eprintln!(
+            "import: embedded cover extracted to {}",
+            embedded_cover_target.display()
+        );
         Some(embedded_cover_target)
     } else if let Some(sidecar) = import_sidecar.as_ref() {
         let ext = sidecar.extension().and_then(|ext| ext.to_str()).unwrap_or("jpg");
         let target_cover = unique_target_path(music_dir, &base_name, ext);
         match fs::copy(sidecar, &target_cover) {
-            Ok(_) => Some(target_cover),
+            Ok(_) => {
+                eprintln!(
+                    "import: sidecar cover copied {} -> {}",
+                    sidecar.display(),
+                    target_cover.display()
+                );
+                Some(target_cover)
+            }
             Err(e) => {
                 eprintln!(
                     "import: copy cover {} -> {} failed: {e}",
@@ -141,6 +184,7 @@ fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, Stri
             }
         }
     } else {
+        eprintln!("import: no cover found for {}", target_mp3.display());
         None
     };
 
@@ -159,7 +203,7 @@ fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, Stri
         .unwrap_or_default()
         .as_secs();
 
-    Ok(FavoriteEntry {
+    let entry = FavoriteEntry {
         uri: format!("local:{file_name}"),
         name: metadata.title,
         artist: metadata.artist,
@@ -171,7 +215,15 @@ fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, Stri
         duration_ms: metadata.duration_ms,
         downloaded: true,
         added_at: now.to_string(),
-    })
+    };
+    eprintln!(
+        "import: ready uri={} file={} cover={}",
+        entry.uri,
+        entry.file_path.as_deref().unwrap_or("none"),
+        entry.cover_path.as_deref().unwrap_or("none")
+    );
+
+    Ok(entry)
 }
 
 fn probe_metadata(path: &Path) -> Option<ImportMetadata> {
@@ -196,6 +248,13 @@ fn probe_metadata(path: &Path) -> Option<ImportMetadata> {
         &String::from_utf8_lossy(&output.stdout),
         path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Imported Track"),
     )
+}
+
+fn resolve_metadata(path: &Path, fallback_stem: &str) -> (ImportMetadata, MetadataSource) {
+    match probe_metadata(path) {
+        Some(metadata) => (metadata, MetadataSource::Ffprobe),
+        None => (metadata_from_filename(fallback_stem), MetadataSource::Filename),
+    }
 }
 
 fn parse_ffprobe_metadata(json: &str, fallback_stem: &str) -> Option<ImportMetadata> {
@@ -303,6 +362,15 @@ fn embedded_cover_extractor_bin() -> &'static str {
     SYSTEM_FFMPEG_BIN
 }
 
+impl MetadataSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ffprobe => "ffprobe",
+            Self::Filename => "filename",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +421,13 @@ mod tests {
     #[test]
     fn embedded_cover_extraction_uses_system_ffmpeg() {
         assert_eq!(embedded_cover_extractor_bin(), "/usr/bin/ffmpeg");
+    }
+
+    #[test]
+    fn resolve_metadata_reports_filename_fallback() {
+        let (meta, source) = resolve_metadata(Path::new("/tmp/missing.mp3"), "Artist - Song");
+        assert_eq!(source, MetadataSource::Filename);
+        assert_eq!(meta.artist, "Artist");
+        assert_eq!(meta.title, "Song");
     }
 }
