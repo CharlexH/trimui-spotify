@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "sideb"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "ab_glyph",
  "jpeg-decoder",
