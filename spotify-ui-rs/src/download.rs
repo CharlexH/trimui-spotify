@@ -1,17 +1,50 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::constants::{FFMPEG_TRANSCODER_BIN, YTDLP_BIN};
+use crate::app::AppState;
+use crate::constants::{FFMPEG_TRANSCODER_BIN, NODE_BIN, YTDLP_BIN};
 use crate::favorites::FavoritesManager;
 use crate::log_utils::{exit_status_label, format_bytes, summarize_command_output};
 use crate::paths::app_paths;
 
 const MAX_RETRIES: u32 = 1;
 const RETRY_DELAY_SECS: u64 = 3;
+const CANDIDATE_COUNT: usize = 5;
+const DURATION_REJECT_THRESHOLD_MS: i64 = 15_000;
+const PROGRESS_THROTTLE_MS: u128 = 400;
+
+/// Download phase visible to the UI.
+/// Overall progress: Queued=0%, Searching=0-25%, Downloading=25-75%, Transcoding=75-100%.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DownloadPhase {
+    /// Waiting in queue for previous downloads to finish.
+    Queued,
+    /// Searching YouTube for candidates (0.0 .. 1.0 within this phase).
+    Searching,
+    /// Downloading audio from YouTube (0.0 .. 1.0 within this phase).
+    Downloading(f32),
+    /// Post-download transcoding to mp3.
+    Transcoding,
+}
+
+impl DownloadPhase {
+    /// Map phase to overall 0.0..1.0 progress for the pie indicator.
+    pub fn overall_progress(&self) -> f32 {
+        match self {
+            Self::Queued => 0.0,
+            Self::Searching => 0.125, // midpoint of 0%-25%
+            Self::Downloading(pct) => 0.25 + pct * 0.50,
+            Self::Transcoding => 0.875, // midpoint of 75%-100%
+        }
+    }
+}
+
+/// Shared progress map: URI → current phase. Entries are removed on completion.
+pub type DownloadProgressMap = Arc<Mutex<HashMap<String, DownloadPhase>>>;
 
 /// A request to download a track in the background.
 #[derive(Debug)]
@@ -20,29 +53,49 @@ pub struct DownloadRequest {
     pub track_name: String,
     pub artist_name: String,
     pub cover_url: String,
+    pub spotify_duration_ms: Option<i64>,
+}
+
+/// A candidate result from YouTube search metadata.
+struct SearchCandidate {
+    id: String,
+    title: String,
+    duration_secs: Option<f64>,
+    channel: Option<String>,
 }
 
 /// Manages a queue of background downloads via yt-dlp.
 pub struct DownloadManager {
     tx: mpsc::Sender<DownloadRequest>,
     pending_uris: Arc<Mutex<HashSet<String>>>,
+    progress: DownloadProgressMap,
 }
 
 impl DownloadManager {
     /// Create a new manager and spawn the background download thread.
-    pub fn new(favorites: Arc<Mutex<FavoritesManager>>) -> Self {
+    pub fn new(
+        favorites: Arc<Mutex<FavoritesManager>>,
+        app_state: Arc<Mutex<AppState>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<DownloadRequest>();
         let pending_uris = Arc::new(Mutex::new(HashSet::new()));
         let pending_clone = Arc::clone(&pending_uris);
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+        let progress_clone = Arc::clone(&progress);
 
         std::thread::Builder::new()
             .name("download".into())
             .spawn(move || {
-                download_loop(rx, favorites, pending_clone);
+                download_loop(rx, favorites, pending_clone, app_state, progress_clone);
             })
             .expect("spawn download thread");
 
-        Self { tx, pending_uris }
+        Self { tx, pending_uris, progress }
+    }
+
+    /// Get a reference to the shared progress map for UI rendering.
+    pub fn progress(&self) -> &DownloadProgressMap {
+        &self.progress
     }
 
     /// Queue a download request. Deduplicates by URI. Non-blocking.
@@ -59,8 +112,12 @@ impl DownloadManager {
         let uri = request.uri.clone();
         let artist_name = request.artist_name.clone();
         let track_name = request.track_name.clone();
+        // Mark as queued in progress map immediately so UI shows it
+        self.progress.lock().unwrap().insert(uri.clone(), DownloadPhase::Queued);
+
         if let Err(e) = self.tx.send(request) {
             eprintln!("download: enqueue failed: {e}");
+            self.progress.lock().unwrap().remove(&uri);
         } else {
             eprintln!(
                 "download: queued uri={} track={} - {} pending={}",
@@ -86,16 +143,218 @@ fn sanitize_filename(s: &str) -> String {
         .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Multi-candidate search & scoring
+// ---------------------------------------------------------------------------
+
+/// Apply common yt-dlp options: JS runtime and optional cookies.
+fn apply_ytdlp_opts(cmd: &mut Command, cookies: Option<&Path>) {
+    let node = Path::new(NODE_BIN);
+    if node.exists() {
+        cmd.args(["--js-runtimes", &format!("node:{}", NODE_BIN)]);
+    }
+    if let Some(cookie_path) = cookies {
+        cmd.args(["--cookies", &cookie_path.to_string_lossy()]);
+    }
+}
+
+/// Resolve yt-dlp cookies path if the file exists.
+fn resolve_cookies_path() -> Option<PathBuf> {
+    let path = app_paths().yt_dlp_cookies_path.clone();
+    if path.exists() {
+        eprintln!("download: cookies found path={}", path.display());
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Search YouTube for candidates using yt-dlp metadata extraction (no download).
+fn search_candidates(query: &str, count: usize, cookies: Option<&Path>) -> Vec<SearchCandidate> {
+    let search_term = format!("ytsearch{}:{}", count, query);
+    let mut cmd = Command::new(YTDLP_BIN);
+    cmd.args(["--dump-single-json", "--flat-playlist", "--no-warnings"]);
+    apply_ytdlp_opts(&mut cmd, cookies);
+    cmd.arg(&search_term);
+
+    eprintln!("download: searching candidates count={count} query={query}");
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("download: candidate search failed to launch: {e}");
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        eprintln!(
+            "download: candidate search failed status={} stderr={}",
+            exit_status_label(&output.status),
+            summarize_command_output(&output.stderr)
+        );
+        return Vec::new();
+    }
+
+    parse_candidates_json(&output.stdout)
+}
+
+/// Parse yt-dlp --dump-single-json output into candidates.
+fn parse_candidates_json(json_bytes: &[u8]) -> Vec<SearchCandidate> {
+    let json_str = String::from_utf8_lossy(json_bytes);
+    let val: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("download: candidate JSON parse error: {e}");
+            return Vec::new();
+        }
+    };
+
+    let entries = match val.get("entries").and_then(|e| e.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let title = entry.get("title").and_then(|v| v.as_str())?.to_string();
+            if title.trim().is_empty() {
+                return None;
+            }
+            let duration_secs = entry.get("duration").and_then(|v| v.as_f64());
+            let channel = entry
+                .get("channel")
+                .or_else(|| entry.get("uploader"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Some(SearchCandidate {
+                id,
+                title,
+                duration_secs,
+                channel,
+            })
+        })
+        .collect()
+}
+
+/// Score a candidate against the download request. Higher is better.
+fn score_candidate(candidate: &SearchCandidate, request: &DownloadRequest) -> f64 {
+    let mut score = 0.0;
+
+    // Duration similarity (40 points max) — strongest signal
+    if let (Some(cand_secs), Some(spotify_ms)) =
+        (candidate.duration_secs, request.spotify_duration_ms)
+    {
+        let cand_ms = (cand_secs * 1000.0) as i64;
+        let diff_ms = (spotify_ms - cand_ms).abs();
+        score += if diff_ms <= 2_000 {
+            40.0
+        } else if diff_ms <= 5_000 {
+            30.0
+        } else if diff_ms <= 10_000 {
+            15.0
+        } else if diff_ms <= 30_000 {
+            5.0
+        } else {
+            0.0
+        };
+    }
+
+    // Title similarity (25 points max)
+    score += title_similarity(&candidate.title, &request.track_name) * 25.0;
+
+    // Channel quality — " - Topic" channels are official label uploads (15 points)
+    if let Some(ref ch) = candidate.channel {
+        if ch.ends_with(" - Topic") {
+            score += 15.0;
+        }
+    }
+
+    // Negative signals — penalize covers/remixes unless the Spotify title has them too
+    let cand_lower = candidate.title.to_lowercase();
+    let req_lower = request.track_name.to_lowercase();
+    for keyword in &["cover", "remix", "live", "karaoke", "instrumental", "acoustic"] {
+        if cand_lower.contains(keyword) && !req_lower.contains(keyword) {
+            score -= 15.0;
+        }
+    }
+
+    score
+}
+
+/// Word-level Jaccard-like similarity between two titles.
+/// Returns 0.0..=1.0 based on what fraction of reference words appear in the candidate.
+fn title_similarity(candidate_title: &str, reference_title: &str) -> f64 {
+    let normalize = |s: &str| -> HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let candidate_words = normalize(candidate_title);
+    let reference_words = normalize(reference_title);
+    if reference_words.is_empty() {
+        return 0.0;
+    }
+    let intersection = candidate_words.intersection(&reference_words).count();
+    intersection as f64 / reference_words.len() as f64
+}
+
+// ---------------------------------------------------------------------------
+// Post-download validation
+// ---------------------------------------------------------------------------
+
+/// Validate a downloaded track by comparing ffprobe duration with Spotify duration.
+/// Returns the measured duration on success, or an error description.
+fn validate_downloaded_track(
+    file: &Path,
+    spotify_duration_ms: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let file_duration_ms = match probe_duration(file) {
+        Some(d) => d,
+        None => return Ok(None), // ffprobe unavailable — skip validation
+    };
+
+    if let Some(expected) = spotify_duration_ms {
+        let diff = (expected - file_duration_ms).abs();
+        if diff > DURATION_REJECT_THRESHOLD_MS {
+            return Err(format!(
+                "duration mismatch: spotify={}ms file={}ms diff={}ms threshold={}ms",
+                expected, file_duration_ms, diff, DURATION_REJECT_THRESHOLD_MS
+            ));
+        }
+        eprintln!(
+            "download: duration validated spotify={}ms file={}ms diff={}ms",
+            expected, file_duration_ms, diff
+        );
+    }
+
+    Ok(Some(file_duration_ms))
+}
+
+// ---------------------------------------------------------------------------
+// Download loop
+// ---------------------------------------------------------------------------
+
 /// Background loop that processes download requests one at a time.
 fn download_loop(
     rx: mpsc::Receiver<DownloadRequest>,
     favorites: Arc<Mutex<FavoritesManager>>,
     pending_uris: Arc<Mutex<HashSet<String>>>,
+    app_state: Arc<Mutex<AppState>>,
+    progress: DownloadProgressMap,
 ) {
     for req in rx.iter() {
         eprintln!(
-            "download: starting uri={} track={} - {}",
-            req.uri, req.artist_name, req.track_name
+            "download: starting uri={} track={} - {} spotify_duration={:?}ms",
+            req.uri, req.artist_name, req.track_name, req.spotify_duration_ms
         );
 
         {
@@ -112,6 +371,10 @@ fn download_loop(
             }
         }
 
+        // Move to searching phase
+        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Searching);
+        mark_dirty(&app_state);
+
         let music_dir = app_paths().music_dir.clone();
         let _ = std::fs::create_dir_all(&music_dir);
 
@@ -127,127 +390,72 @@ fn download_loop(
             cover_path.display()
         );
 
-        if output_path.exists() {
+        {
             let is_downloaded = favorites
                 .lock()
                 .unwrap()
                 .find_by_uri(&req.uri)
                 .map_or(false, |e| e.downloaded);
             if !is_downloaded {
-                eprintln!(
-                    "download: removing stale partial file: {}",
-                    output_path.display()
-                );
-                let _ = std::fs::remove_file(&output_path);
+                cleanup_stale_files(&output_path, &base_name, &music_dir);
             }
         }
 
         let search_query = build_search_query(&req);
         let output_template = output_path.to_string_lossy().to_string();
-        let mut success = false;
+        let cookies = resolve_cookies_path();
 
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
+        let candidates = search_candidates(
+            &search_query,
+            CANDIDATE_COUNT,
+            cookies.as_deref(),
+        );
+
+        let success = if candidates.is_empty() {
+            eprintln!("download: no candidates found, falling back to direct search");
+            try_direct_download(
+                &req,
+                &search_query,
+                &output_template,
+                &output_path,
+                cookies.as_deref(),
+                &favorites,
+                &progress,
+                &app_state,
+            )
+        } else {
+            let mut scored: Vec<(f64, &SearchCandidate)> = candidates
+                .iter()
+                .map(|c| (score_candidate(c, &req), c))
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (i, (sc, cand)) in scored.iter().enumerate() {
                 eprintln!(
-                    "download: retry {attempt}/{MAX_RETRIES} for {} - {}",
-                    req.artist_name, req.track_name
+                    "download: candidate #{} score={:.1} id={} title=\"{}\" duration={:.1}s channel={:?}",
+                    i + 1,
+                    sc,
+                    cand.id,
+                    cand.title,
+                    cand.duration_secs.unwrap_or(0.0),
+                    cand.channel
                 );
-                std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
-
-                if !favorites.lock().unwrap().is_favorited(&req.uri) {
-                    eprintln!("download: skipping retry (unfavorited): {}", req.uri);
-                    break;
-                }
             }
 
-            eprintln!(
-                "download: launching yt-dlp attempt={}/{} uri={} query={} output={} ytdlp={} ffmpeg={}",
-                attempt + 1,
-                MAX_RETRIES + 1,
-                req.uri,
-                search_query,
-                output_path.display(),
-                YTDLP_BIN,
-                FFMPEG_TRANSCODER_BIN
-            );
-            let result = Command::new(YTDLP_BIN)
-                .args([
-                    "-x",
-                    "--audio-format",
-                    "mp3",
-                    "--audio-quality",
-                    "5",
-                    "--no-playlist",
-                    "--ffmpeg-location",
-                    FFMPEG_TRANSCODER_BIN,
-                    "-o",
-                    &output_template,
-                    &format!("ytsearch1:{}", search_query),
-                ])
-                .output();
-
-            match result {
-                Ok(output) if output.status.success() => {
-                    success = true;
-                    break;
-                }
-                Ok(output) => {
-                    eprintln!(
-                        "download: yt-dlp failed attempt={}/{} uri={} status={} stderr={}",
-                        attempt + 1,
-                        MAX_RETRIES + 1,
-                        req.uri,
-                        exit_status_label(&output.status),
-                        summarize_command_output(&output.stderr)
-                    );
-                    if output_path.exists() {
-                        let _ = std::fs::remove_file(&output_path);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("download: failed to run yt-dlp: {e}");
-                    break;
-                }
-            }
-        }
+            try_candidates_download(
+                &req,
+                &scored,
+                &output_template,
+                &output_path,
+                cookies.as_deref(),
+                &favorites,
+                &progress,
+                &app_state,
+            )
+        };
 
         if success {
-            let size = fs::metadata(&output_path)
-                .map(|meta| format_bytes(meta.len()))
-                .unwrap_or_else(|_| "unknown".to_string());
-            eprintln!(
-                "download: success uri={} mp3={} size={}",
-                req.uri,
-                output_path.display(),
-                size
-            );
-
-            let duration_ms = probe_duration(&output_path);
-
-            let mut fav = favorites.lock().unwrap();
-            fav.mark_downloaded(&req.uri, &output_path.to_string_lossy(), duration_ms);
-            eprintln!(
-                "download: library updated uri={} duration_ms={:?}",
-                req.uri, duration_ms
-            );
-
-            let cover_downloaded = download_cover(&req.cover_url, &cover_path);
-            if !cover_path.exists() && !req.cover_url.is_empty() {
-                let copied = try_copy_from_cover_cache(&req.cover_url, &cover_path);
-                if !cover_downloaded && !copied {
-                    eprintln!("download: cover unavailable uri={}", req.uri);
-                }
-            } else if req.cover_url.is_empty() {
-                eprintln!("download: no cover url for uri={}", req.uri);
-            }
-            if cover_path.exists() {
-                fav.set_cover_path(&req.uri, &cover_path.to_string_lossy());
-                eprintln!(
-                    "download: cover ready uri={} path={}",
-                    req.uri,
-                    cover_path.display()
-                );
-            }
+            finalize_download(&req, &output_path, &cover_path, &favorites);
         } else {
             if output_path.exists() {
                 let _ = std::fs::remove_file(&output_path);
@@ -263,7 +471,311 @@ fn download_loop(
             );
         }
 
+        // Clear progress entry and notify UI
+        progress.lock().unwrap().remove(&req.uri);
+        mark_dirty(&app_state);
         pending_uris.lock().unwrap().remove(&req.uri);
+    }
+}
+
+fn mark_dirty(app_state: &Arc<Mutex<AppState>>) {
+    if let Ok(mut st) = app_state.lock() {
+        st.render_dirty = true;
+    }
+}
+
+/// Try downloading each scored candidate in order, with post-download validation.
+fn try_candidates_download(
+    req: &DownloadRequest,
+    scored: &[(f64, &SearchCandidate)],
+    output_template: &str,
+    output_path: &Path,
+    cookies: Option<&Path>,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+) -> bool {
+    for (rank, (score, cand)) in scored.iter().enumerate() {
+        if !favorites.lock().unwrap().is_favorited(&req.uri) {
+            eprintln!("download: skipping (unfavorited during search): {}", req.uri);
+            return false;
+        }
+
+        // Reset progress for each new candidate attempt
+        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
+        mark_dirty(app_state);
+
+        let yt_url = format!("https://www.youtube.com/watch?v={}", cand.id);
+        eprintln!(
+            "download: trying candidate #{} score={:.1} id={} uri={}",
+            rank + 1,
+            score,
+            cand.id,
+            req.uri
+        );
+
+        if download_single_url(&yt_url, output_template, cookies, &req.uri, progress, app_state, req.spotify_duration_ms) {
+            match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                Ok(_) => return true,
+                Err(reason) => {
+                    eprintln!(
+                        "download: candidate #{} rejected: {} uri={}",
+                        rank + 1,
+                        reason,
+                        req.uri
+                    );
+                    let _ = std::fs::remove_file(output_path);
+                }
+            }
+        } else if output_path.exists() {
+            let _ = std::fs::remove_file(output_path);
+        }
+    }
+    false
+}
+
+/// Download audio from a specific YouTube URL, reporting progress via file size polling.
+fn download_single_url(
+    url: &str,
+    output_template: &str,
+    cookies: Option<&Path>,
+    uri: &str,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+    expected_duration_ms: Option<i64>,
+) -> bool {
+    let mut cmd = Command::new(YTDLP_BIN);
+    cmd.args([
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "5",
+        "--no-playlist",
+        "--ffmpeg-location",
+        FFMPEG_TRANSCODER_BIN,
+        "-o",
+        output_template,
+    ]);
+    apply_ytdlp_opts(&mut cmd, cookies);
+    cmd.arg(url);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("download: failed to run yt-dlp: {e}");
+            return false;
+        }
+    };
+
+    // Poll file size in a background thread to estimate progress
+    let poll_uri = uri.to_string();
+    let poll_progress = Arc::clone(progress);
+    let poll_app_state = Arc::clone(app_state);
+    let poll_path = PathBuf::from(output_template);
+    let poll_duration_ms = expected_duration_ms;
+    let child_id = child.id();
+
+    let poll_handle = std::thread::spawn(move || {
+        // Estimate expected file size: ~128kbps mp3 at quality 5 ≈ 16KB/s
+        let expected_bytes = poll_duration_ms
+            .map(|ms| (ms as f64 / 1000.0 * 16_000.0) as u64)
+            .unwrap_or(5_000_000);
+
+        let poll_interval = std::time::Duration::from_millis(PROGRESS_THROTTLE_MS as u64);
+        let mut saw_mp3 = false;
+
+        loop {
+            std::thread::sleep(poll_interval);
+
+            // Check if yt-dlp process is still alive
+            let alive = unsafe { libc::kill(child_id as i32, 0) } == 0;
+            if !alive {
+                break;
+            }
+
+            // Look for intermediate files (.webm, .m4a, .opus) or the final .mp3
+            let mp3_exists = poll_path.exists();
+            let base = poll_path.with_extension("");
+            let intermediate_size: u64 = ["webm", "m4a", "opus", "part"]
+                .iter()
+                .filter_map(|ext| {
+                    let p = base.with_extension(ext);
+                    fs::metadata(&p).ok().map(|m| m.len())
+                })
+                .sum();
+
+            if mp3_exists && !saw_mp3 {
+                // mp3 appeared — transcoding phase
+                saw_mp3 = true;
+                poll_progress.lock().unwrap().insert(poll_uri.clone(), DownloadPhase::Transcoding);
+                mark_dirty(&poll_app_state);
+            } else if intermediate_size > 0 && !saw_mp3 {
+                // Still downloading intermediate format
+                let pct = (intermediate_size as f32 / expected_bytes as f32).clamp(0.01, 0.95);
+                poll_progress.lock().unwrap().insert(poll_uri.clone(), DownloadPhase::Downloading(pct));
+                mark_dirty(&poll_app_state);
+            }
+        }
+    });
+
+    match child.wait() {
+        Ok(status) => {
+            let _ = poll_handle.join();
+            if status.success() {
+                true
+            } else {
+                eprintln!(
+                    "download: yt-dlp failed url={} status={}",
+                    url,
+                    exit_status_label(&status),
+                );
+                false
+            }
+        }
+        Err(e) => {
+            eprintln!("download: yt-dlp wait error: {e}");
+            let _ = poll_handle.join();
+            false
+        }
+    }
+}
+
+/// Parse a yt-dlp progress line like "[download]  45.2% of 3.5MiB" into 0.0..1.0.
+fn parse_ytdlp_progress(line: &str) -> Option<f32> {
+    let line = line.trim();
+    if !line.starts_with("[download]") {
+        return None;
+    }
+    // Find the percentage: look for a number followed by '%'
+    let after_tag = &line["[download]".len()..];
+    let pct_pos = after_tag.find('%')?;
+    let num_str = after_tag[..pct_pos].trim();
+    let pct: f32 = num_str.parse().ok()?;
+    Some((pct / 100.0).clamp(0.0, 1.0))
+}
+
+/// Fallback: direct ytsearch1 download (used when candidate search returns nothing).
+fn try_direct_download(
+    req: &DownloadRequest,
+    search_query: &str,
+    output_template: &str,
+    output_path: &Path,
+    cookies: Option<&Path>,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+) -> bool {
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            eprintln!(
+                "download: retry {attempt}/{MAX_RETRIES} for {} - {}",
+                req.artist_name, req.track_name
+            );
+            std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
+
+            if !favorites.lock().unwrap().is_favorited(&req.uri) {
+                eprintln!("download: skipping retry (unfavorited): {}", req.uri);
+                break;
+            }
+        }
+
+        // Reset progress for retry
+        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
+        mark_dirty(app_state);
+
+        eprintln!(
+            "download: direct search attempt={}/{} uri={} query={}",
+            attempt + 1,
+            MAX_RETRIES + 1,
+            req.uri,
+            search_query,
+        );
+
+        let search_url = format!("ytsearch1:{}", search_query);
+        if download_single_url(&search_url, output_template, cookies, &req.uri, progress, app_state, req.spotify_duration_ms) {
+            match validate_downloaded_track(output_path, req.spotify_duration_ms) {
+                Ok(_) => return true,
+                Err(reason) => {
+                    eprintln!(
+                        "download: direct download rejected: {} uri={}",
+                        reason, req.uri
+                    );
+                    let _ = std::fs::remove_file(output_path);
+                }
+            }
+        } else if output_path.exists() {
+            let _ = std::fs::remove_file(output_path);
+        }
+    }
+    false
+}
+
+/// Finalize a successful download: probe duration, update favorites, fetch cover.
+fn finalize_download(
+    req: &DownloadRequest,
+    output_path: &Path,
+    cover_path: &Path,
+    favorites: &Arc<Mutex<FavoritesManager>>,
+) {
+    let size = fs::metadata(output_path)
+        .map(|meta| format_bytes(meta.len()))
+        .unwrap_or_else(|_| "unknown".to_string());
+    eprintln!(
+        "download: success uri={} mp3={} size={}",
+        req.uri,
+        output_path.display(),
+        size
+    );
+
+    let duration_ms = probe_duration(output_path);
+
+    let mut fav = favorites.lock().unwrap();
+    fav.mark_downloaded(&req.uri, &output_path.to_string_lossy(), duration_ms);
+    eprintln!(
+        "download: library updated uri={} duration_ms={:?}",
+        req.uri, duration_ms
+    );
+
+    let cover_downloaded = download_cover(&req.cover_url, cover_path);
+    if !cover_path.exists() && !req.cover_url.is_empty() {
+        let copied = try_copy_from_cover_cache(&req.cover_url, cover_path);
+        if !cover_downloaded && !copied {
+            eprintln!("download: cover unavailable uri={}", req.uri);
+        }
+    } else if req.cover_url.is_empty() {
+        eprintln!("download: no cover url for uri={}", req.uri);
+    }
+    if cover_path.exists() {
+        fav.set_cover_path(&req.uri, &cover_path.to_string_lossy());
+        eprintln!(
+            "download: cover ready uri={} path={}",
+            req.uri,
+            cover_path.display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Remove stale partial files left by a previous interrupted download.
+/// Cleans up the target mp3 and any yt-dlp intermediate files sharing the same base name.
+fn cleanup_stale_files(output_path: &Path, base_name: &str, music_dir: &Path) {
+    let stale_extensions = ["mp3", "webm", "m4a", "opus", "ogg", "wav", "part"];
+    for ext in &stale_extensions {
+        let path = music_dir.join(format!("{}.{}", base_name, ext));
+        if path.exists() {
+            eprintln!("download: removing stale file: {}", path.display());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    // Also check for .mp3.part (yt-dlp partial download marker)
+    let part_path = PathBuf::from(format!("{}.part", output_path.display()));
+    if part_path.exists() {
+        eprintln!("download: removing stale file: {}", part_path.display());
+        let _ = std::fs::remove_file(&part_path);
     }
 }
 
@@ -401,13 +913,204 @@ mod tests {
             track_name: "Komm, Susser Tod".to_string(),
             artist_name: "Arianne".to_string(),
             cover_url: String::new(),
+            spotify_duration_ms: Some(467_000),
         }
     }
 
     #[test]
     fn legacy_download_query_uses_artist_dash_track_format() {
         let request = sample_request();
-
         assert_eq!(build_search_query(&request), "Arianne - Komm, Susser Tod");
+    }
+
+    // --- Title similarity ---
+
+    #[test]
+    fn title_similarity_exact_match_returns_one() {
+        assert!((title_similarity("Komm, Susser Tod", "Komm, Susser Tod") - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn title_similarity_partial_overlap() {
+        // "Komm" and "Tod" match out of 3 reference words → 2/3
+        let sim = title_similarity("Komm Bitter Tod", "Komm, Susser Tod");
+        assert!((sim - 2.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn title_similarity_no_overlap_returns_zero() {
+        assert!(title_similarity("Something Else Entirely", "Komm, Susser Tod").abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn title_similarity_empty_reference_returns_zero() {
+        assert!(title_similarity("Hello", "").abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn title_similarity_is_case_insensitive() {
+        assert!((title_similarity("KOMM SUSSER TOD", "komm susser tod") - 1.0).abs() < f64::EPSILON);
+    }
+
+    // --- Candidate scoring ---
+
+    #[test]
+    fn score_perfect_match_is_high() {
+        let req = sample_request(); // 467_000ms
+        let cand = SearchCandidate {
+            id: "abc".into(),
+            title: "Arianne - Komm, Susser Tod".into(),
+            duration_secs: Some(467.0), // exact match
+            channel: Some("Arianne - Topic".into()),
+        };
+        let score = score_candidate(&cand, &req);
+        // 40 (duration) + 25 (all words match) + 15 (Topic) = 80
+        assert!(score >= 75.0, "expected high score, got {score}");
+    }
+
+    #[test]
+    fn score_wrong_duration_is_low() {
+        let req = sample_request(); // 467_000ms
+        let cand = SearchCandidate {
+            id: "xyz".into(),
+            title: "Komm, Susser Tod".into(),
+            duration_secs: Some(600.0), // 133s off — way too long
+            channel: None,
+        };
+        let score = score_candidate(&cand, &req);
+        // 0 (duration >30s off) + 25 (title match) + 0 (no Topic) = 25
+        assert!(score <= 30.0, "expected low score for wrong duration, got {score}");
+    }
+
+    #[test]
+    fn score_cover_version_is_penalized() {
+        let req = sample_request();
+        let cand = SearchCandidate {
+            id: "cov".into(),
+            title: "Komm, Susser Tod (Cover)".into(),
+            duration_secs: Some(467.0),
+            channel: None,
+        };
+        let score = score_candidate(&cand, &req);
+        // 40 (duration) + ~25 (title) - 15 (cover penalty) + 0 = ~50
+        // vs perfect match of ~80 — cover should rank lower
+        assert!(score < 60.0, "cover should be penalized, got {score}");
+    }
+
+    #[test]
+    fn score_topic_channel_beats_random_channel() {
+        let req = sample_request();
+        let topic = SearchCandidate {
+            id: "t".into(),
+            title: "Komm, Susser Tod".into(),
+            duration_secs: Some(467.0),
+            channel: Some("Arianne - Topic".into()),
+        };
+        let random = SearchCandidate {
+            id: "r".into(),
+            title: "Komm, Susser Tod".into(),
+            duration_secs: Some(467.0),
+            channel: Some("RandomUser123".into()),
+        };
+        assert!(score_candidate(&topic, &req) > score_candidate(&random, &req));
+    }
+
+    // --- Candidate JSON parsing ---
+
+    #[test]
+    fn parse_candidates_extracts_entries() {
+        let json = r#"{
+            "entries": [
+                {"id": "abc123", "title": "Song Title", "duration": 245.5, "channel": "Artist - Topic"},
+                {"id": "def456", "title": "Another Song", "duration": 180.0, "uploader": "SomeUser"},
+                {"id": "ghi789", "title": "", "duration": 100.0}
+            ]
+        }"#;
+        let candidates = parse_candidates_json(json.as_bytes());
+        assert_eq!(candidates.len(), 2); // empty title is filtered
+        assert_eq!(candidates[0].id, "abc123");
+        assert_eq!(candidates[0].title, "Song Title");
+        assert!((candidates[0].duration_secs.unwrap() - 245.5).abs() < 0.01);
+        assert_eq!(candidates[0].channel.as_deref(), Some("Artist - Topic"));
+        assert_eq!(candidates[1].channel.as_deref(), Some("SomeUser")); // uploader fallback
+    }
+
+    #[test]
+    fn parse_candidates_handles_missing_entries() {
+        let json = r#"{"type": "playlist"}"#;
+        assert!(parse_candidates_json(json.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn parse_candidates_handles_invalid_json() {
+        assert!(parse_candidates_json(b"not json").is_empty());
+    }
+
+    // --- Duration validation ---
+
+    #[test]
+    fn validate_passes_when_no_spotify_duration() {
+        // Cannot test with real file, but verify the logic path
+        // When spotify_duration_ms is None, validation should pass
+        // (tested via the Ok path — actual ffprobe call would fail without a file)
+        assert!(validate_downloaded_track(Path::new("/nonexistent"), None).is_ok());
+    }
+
+    // --- Progress parsing ---
+
+    #[test]
+    fn parse_progress_extracts_percentage() {
+        let pct = parse_ytdlp_progress("[download]  45.2% of 3.5MiB at 1.2MiB/s").unwrap();
+        assert!((pct - 0.452).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_progress_handles_100_percent() {
+        assert_eq!(parse_ytdlp_progress("[download] 100% of 3.5MiB"), Some(1.0));
+    }
+
+    #[test]
+    fn parse_progress_ignores_non_download_lines() {
+        assert_eq!(parse_ytdlp_progress("[info] Extracting URL: ..."), None);
+    }
+
+    #[test]
+    fn parse_progress_ignores_destination_line() {
+        assert_eq!(parse_ytdlp_progress("[download] Destination: file.webm"), None);
+    }
+
+    #[test]
+    fn parse_progress_clamps_to_unit_range() {
+        let result = parse_ytdlp_progress("[download] 0.0% of 1MiB");
+        assert_eq!(result, Some(0.0));
+    }
+
+    // --- Overall progress mapping ---
+
+    #[test]
+    fn overall_progress_queued_is_zero() {
+        assert_eq!(DownloadPhase::Queued.overall_progress(), 0.0);
+    }
+
+    #[test]
+    fn overall_progress_searching_is_in_first_quarter() {
+        let p = DownloadPhase::Searching.overall_progress();
+        assert!(p > 0.0 && p <= 0.25);
+    }
+
+    #[test]
+    fn overall_progress_downloading_maps_to_25_75() {
+        let start = DownloadPhase::Downloading(0.0).overall_progress();
+        let mid = DownloadPhase::Downloading(0.5).overall_progress();
+        let end = DownloadPhase::Downloading(1.0).overall_progress();
+        assert!((start - 0.25).abs() < 0.001);
+        assert!((mid - 0.50).abs() < 0.001);
+        assert!((end - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn overall_progress_transcoding_is_in_last_quarter() {
+        let p = DownloadPhase::Transcoding.overall_progress();
+        assert!(p >= 0.75 && p <= 1.0);
     }
 }

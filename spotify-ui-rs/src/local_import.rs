@@ -216,6 +216,7 @@ fn import_one(import_mp3: &Path, music_dir: &Path) -> Result<FavoriteEntry, Stri
         file_path: Some(target_mp3.to_string_lossy().to_string()),
         cover_path: cover_path.map(|path| path.to_string_lossy().to_string()),
         duration_ms: metadata.duration_ms,
+        spotify_duration_ms: None,
         downloaded: true,
         added_at: now.to_string(),
     };

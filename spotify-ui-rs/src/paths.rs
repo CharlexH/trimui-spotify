@@ -9,6 +9,7 @@ pub struct AppPaths {
     pub imports_dir: PathBuf,
     pub music_dir: PathBuf,
     pub favorites_path: PathBuf,
+    pub yt_dlp_cookies_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -54,6 +55,7 @@ fn detect_paths_with(overrides: PathOverrides) -> AppPaths {
         imports_dir: data_dir.join("imports"),
         music_dir: data_dir.join("music"),
         favorites_path: data_dir.join("favorites.json"),
+        yt_dlp_cookies_path: data_dir.join("yt-dlp-cookies.txt"),
     }
 }
 
