@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use crate::constants::*;
+use crate::download::DownloadPhase;
 use crate::drawing;
 use crate::favorites::FavoriteEntry;
 use crate::font::FontSet;
@@ -26,6 +29,7 @@ pub fn render_playlist_overlay(
     playing_uri: Option<&str>,
     confirm_message: Option<&str>,
     fonts: &FontSet,
+    download_progress: &HashMap<String, DownloadPhase>,
 ) {
     // Black background
     drawing::fill_rect(buf, 0, 0, SCREEN_W as i32, SCREEN_H as i32, 0, 0, 0, 255);
@@ -164,10 +168,25 @@ pub fn render_playlist_overlay(
             let indicator_x = PLAYLIST_X + PLAYLIST_W - 32;
             let indicator_y = layout.indicator_y;
             if entry.downloaded {
-                // Green filled circle
+                // Green filled circle — completed
                 draw_circle_filled(buf, indicator_x, indicator_y, 6, 80, 200, 80, 255);
+            } else if let Some(phase) = download_progress.get(&entry.uri) {
+                match phase {
+                    DownloadPhase::Queued => {
+                        // White hollow circle — queued, waiting
+                        draw_circle_outline(buf, indicator_x, indicator_y, 6, 200, 200, 200, 200);
+                    }
+                    _ => {
+                        // Yellow pie arc — searching/downloading/transcoding
+                        let pct = phase.overall_progress();
+                        draw_circle_outline(buf, indicator_x, indicator_y, 6, 220, 200, 60, 160);
+                        if pct > 0.0 {
+                            draw_pie(buf, indicator_x, indicator_y, 6, pct, 220, 200, 60, 255);
+                        }
+                    }
+                }
             } else {
-                // Gray hollow circle
+                // Gray hollow circle — not downloaded
                 draw_circle_outline(buf, indicator_x, indicator_y, 6, 120, 120, 120, 180);
             }
         }
@@ -359,12 +378,52 @@ fn draw_circle_filled(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8, 
 }
 
 fn draw_circle_outline(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8, b: u8, a: u8) {
+    let inner = (r - 2) * (r - 2); // 2px stroke width
+    let outer = r * r;
     for dy in -r..=r {
         for dx in -r..=r {
             let dist_sq = dx * dx + dy * dy;
-            let inner = (r - 1) * (r - 1);
-            let outer = r * r;
             if dist_sq >= inner && dist_sq <= outer {
+                drawing::blend_pixel(buf, cx + dx, cy + dy, red, g, b, a);
+            }
+        }
+    }
+}
+
+/// Draw a pie/fan shape from 12-o'clock clockwise, filled to `progress` (0.0..1.0).
+fn draw_pie(
+    buf: &mut [u8],
+    cx: i32,
+    cy: i32,
+    r: i32,
+    progress: f32,
+    red: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    if progress <= 0.0 {
+        return;
+    }
+    if progress >= 1.0 {
+        draw_circle_filled(buf, cx, cy, r, red, g, b, a);
+        return;
+    }
+    let angle_limit = progress * std::f32::consts::TAU;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            // Angle from 12-o'clock (up), clockwise
+            // atan2(dx, -dy): x component is horizontal displacement, y component is inverted
+            let angle = (dx as f32).atan2(-dy as f32);
+            let angle = if angle < 0.0 {
+                angle + std::f32::consts::TAU
+            } else {
+                angle
+            };
+            if angle <= angle_limit {
                 drawing::blend_pixel(buf, cx + dx, cy + dy, red, g, b, a);
             }
         }

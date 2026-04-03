@@ -130,7 +130,35 @@ fn main() {
     let (cmd_tx, cmd_rx) = mpsc::channel::<InputAction>();
 
     // Create download manager (spawns its own background thread)
-    let download_manager = DownloadManager::new(Arc::clone(&favorites));
+    let download_manager = DownloadManager::new(Arc::clone(&favorites), Arc::clone(&app_state));
+    let download_progress = Arc::clone(download_manager.progress());
+
+    // Resume incomplete downloads from previous session
+    {
+        let fav = favorites.lock().unwrap();
+        let pending: Vec<_> = fav
+            .all_entries()
+            .iter()
+            .filter(|e| !e.downloaded && e.source == FavoriteSource::Spotify)
+            .cloned()
+            .collect();
+        drop(fav);
+        if !pending.is_empty() {
+            eprintln!(
+                "download: resuming {} incomplete download(s) from previous session",
+                pending.len()
+            );
+            for entry in &pending {
+                download_manager.enqueue(DownloadRequest {
+                    uri: entry.uri.clone(),
+                    track_name: entry.name.clone(),
+                    artist_name: entry.artist.clone(),
+                    cover_url: entry.cover_url.clone(),
+                    spotify_duration_ms: entry.spotify_duration_ms,
+                });
+            }
+        }
+    }
 
     // Set initial mode: Local (paused) if favorites exist, else Waiting
     {
@@ -297,6 +325,7 @@ fn main() {
         &fonts,
         render_quit,
         Arc::clone(&favorites),
+        Arc::clone(&download_progress),
     );
 
     // Stop all playback on exit
@@ -351,7 +380,7 @@ fn command_processor(
             }
 
             InputAction::ToggleFavorite => {
-                let (uri, name, artist, album, cover_url) = {
+                let (uri, name, artist, album, cover_url, spotify_duration_ms) = {
                     let st = app_state.lock().unwrap();
                     match st.mode {
                         AppMode::Spotify => {
@@ -361,12 +390,18 @@ fn command_processor(
                                 .requested_cover_url
                                 .clone()
                                 .unwrap_or_default();
+                            let dur = if st.duration > 0 {
+                                Some(st.duration)
+                            } else {
+                                None
+                            };
                             (
                                 st.current_track_uri.clone(),
                                 st.track_name.clone(),
                                 st.artist_name.clone(),
                                 st.album_name.clone(),
                                 cover,
+                                dur,
                             )
                         }
                         AppMode::Local => {
@@ -378,6 +413,7 @@ fn command_processor(
                                     entry.artist.clone(),
                                     entry.album.clone(),
                                     entry.cover_url.clone(),
+                                    entry.spotify_duration_ms,
                                 )
                             } else {
                                 continue;
@@ -433,6 +469,7 @@ fn command_processor(
                         file_path: None,
                         cover_path: None,
                         duration_ms: None,
+                        spotify_duration_ms,
                         downloaded: false,
                         added_at: format!("{}", now),
                     };
@@ -459,6 +496,7 @@ fn command_processor(
                             track_name: name,
                             artist_name: artist,
                             cover_url,
+                            spotify_duration_ms,
                         });
                     }
                 }
@@ -1091,6 +1129,7 @@ mod tests {
             file_path: Some(format!("/tmp/{uri}.mp3")),
             cover_path: None,
             duration_ms: Some(1_000),
+            spotify_duration_ms: None,
             downloaded: true,
             added_at: "0".to_string(),
         }

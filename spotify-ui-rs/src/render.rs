@@ -619,6 +619,7 @@ pub fn render_loop(
     fonts: &FontSet,
     quit: Arc<AtomicBool>,
     favorites: Arc<Mutex<FavoritesManager>>,
+    download_progress: crate::download::DownloadProgressMap,
 ) {
     let mut last_frame = Instant::now();
     let mut last_connected = false;
@@ -726,7 +727,7 @@ pub fn render_loop(
 
                 // Playlist overlay on waiting screen
                 if playlist_visible {
-                    render_playlist(back_buf, &app_state, &favorites, fonts);
+                    render_playlist(back_buf, &app_state, &favorites, fonts, &download_progress);
                 }
 
                 fb.swap_buffers(back_buf);
@@ -830,7 +831,7 @@ pub fn render_loop(
 
             // Playlist overlay on playing screen
             if playlist_visible {
-                render_playlist(back_buf, &app_state, &favorites, fonts);
+                render_playlist(back_buf, &app_state, &favorites, fonts, &download_progress);
             }
 
             if full_redraw || playlist_visible {
@@ -869,6 +870,7 @@ fn render_playlist(
     app_state: &Arc<Mutex<AppState>>,
     favorites: &Arc<Mutex<FavoritesManager>>,
     fonts: &FontSet,
+    download_progress: &crate::download::DownloadProgressMap,
 ) {
     let mut st = app_state.lock().unwrap();
     let selected = st.playlist_selected;
@@ -885,6 +887,7 @@ fn render_playlist(
     } else {
         Some(playing_uri.as_str())
     };
+    let progress_snapshot = download_progress.lock().unwrap().clone();
     playlist_view::render_playlist_overlay(
         buf,
         &entries,
@@ -892,6 +895,7 @@ fn render_playlist(
         uri_ref,
         confirm_message,
         fonts,
+        &progress_snapshot,
     );
 }
 

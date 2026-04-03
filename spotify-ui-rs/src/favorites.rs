@@ -26,6 +26,8 @@ pub struct FavoriteEntry {
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default)]
+    pub spotify_duration_ms: Option<i64>,
+    #[serde(default)]
     pub downloaded: bool,
     pub added_at: String,
 }
@@ -211,6 +213,7 @@ mod tests {
             file_path,
             cover_path,
             duration_ms: None,
+            spotify_duration_ms: None,
             downloaded: true,
             added_at: "0".to_string(),
         }

@@ -88,6 +88,7 @@ pub const PLAYLIST_VISIBLE_ITEMS: usize = 12;
 pub const YTDLP_BIN: &str = "/tmp/yt-dlp";
 pub const FFMPEG_TRANSCODER_BIN: &str = "/tmp/ffmpeg-lite";
 pub const SYSTEM_FFMPEG_BIN: &str = "/usr/bin/ffmpeg";
+pub const NODE_BIN: &str = "/tmp/node";
 
 #[cfg(test)]
 mod tests {
