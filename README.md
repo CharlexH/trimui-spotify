@@ -2,32 +2,33 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.4`
+Latest release: `v1.0.5`
 
-- Bundled `ffmpeg-lite` runtime for offline caching and local playback
-- Improved FAV LIST navigation with wrap-around selection and hold-to-repeat controls
-- Better runtime logging and cleaner Spotify-to-local playback handoff
+- Smart multi-candidate YouTube search with duration-based scoring for accurate offline caching
+- Post-download duration validation to reject mismatched tracks
+- Real-time download progress indicator in FAV LIST (queued / searching / downloading / transcoding)
+- Automatic resume of incomplete downloads on startup
 
 ## Screenshots 📸
 
 <table>
   <tr>
     <td align="center">
-      <img src="screenshots/spotify_connecting.png.webp" alt="Spotify connecting screen" width="360"><br>
+      <img src="screenshots/spotify_connecting.png" alt="Spotify connecting screen" width="360"><br>
       <strong>Spotify connecting</strong>
     </td>
     <td align="center">
-      <img src="screenshots/favlist.png.webp" alt="Favorites list" width="360"><br>
+      <img src="screenshots/favlist.png" alt="Favorites list" width="360"><br>
       <strong>FAV LIST</strong>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="screenshots/offline_playing.png.webp" alt="Offline local playback" width="360"><br>
+      <img src="screenshots/offline_playing.png" alt="Offline local playback" width="360"><br>
       <strong>Offline playback</strong>
     </td>
     <td align="center">
-      <img src="screenshots/waiting.png.webp" alt="Waiting screen" width="360"><br>
+      <img src="screenshots/waiting.png" alt="Waiting screen" width="360"><br>
       <strong>Waiting screen</strong>
     </td>
   </tr>
@@ -62,7 +63,7 @@ The app consists of two components:
 
 ### Offline playback pipeline
 
-When a user marks a track as a favorite, the app searches for a matching publicly available audio source on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp) and caches it locally as an MP3 file on the SD card. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the device's built-in `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache.
+When a user marks a track as a favorite, the app searches for multiple matching candidates on YouTube using [yt-dlp](https://github.com/yt-dlp/yt-dlp), scores them by duration match against Spotify metadata, title similarity, and channel quality, then downloads the best match as an MP3 file on the SD card. After download, the actual file duration is validated against the Spotify track length to reject mismatched results. Downloads use a bundled FFmpeg-compatible audio transcoder with MP3 encoder support. Cached audio is played back through the device's built-in `ffmpeg → aplay` subprocess pipeline. Cover art is fetched from the Spotify CDN or copied from the local cover cache. Incomplete downloads are automatically resumed on the next app launch.
 
 For manual local playback, users can also drop MP3 files into `data/imports/`. SideB scans that folder automatically, reads MP3 metadata, moves the file into `data/music/`, extracts embedded cover art with the device's system ffmpeg when available, and adds the track to `FAV LIST` as a managed local item.
 
@@ -199,7 +200,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.4`
+Current release tag: `v1.0.5`
 
 ## Repo Layout 🗂️
 
