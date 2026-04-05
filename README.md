@@ -135,31 +135,21 @@ Notes:
 
 ## Troubleshooting: Downloads Failing
 
-If all downloads fail and the log (`/tmp/sideb.log`) shows `Sign in to confirm you're not a bot`, your YouTube cookies have expired. Fix it in 3 steps:
+If downloads fail with `Sign in to confirm you're not a bot` in the log (`/tmp/sideb.log`), YouTube needs valid cookies.
 
-1. **Install yt-dlp on your computer** (if you don't have it):
+**Use Firefox** (recommended — Chrome rotates cookies on export, making them expire immediately):
+
+1. Install [Firefox](https://www.mozilla.org/firefox/) and log into YouTube
+2. Install [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp` / `winget install yt-dlp`)
+3. Export cookies and copy to the device:
    ```bash
-   # macOS
-   brew install yt-dlp
-   # Windows
-   winget install yt-dlp
+   yt-dlp --cookies-from-browser firefox --cookies cookies.txt -s "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
    ```
-
-2. **Export fresh cookies** (make sure you're logged into YouTube in Chrome):
-   ```bash
-   yt-dlp --cookies-from-browser chrome --cookies cookies.txt -s "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-   ```
-
-3. **Copy to the device SD card**, replacing the old file:
-   ```text
-   NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/data/yt-dlp-cookies.txt
-   Stock    -> /mnt/SDCARD/Apps/SideB/data/yt-dlp-cookies.txt
-   CrossMix -> /mnt/SDCARD/Apps/SideB/data/yt-dlp-cookies.txt
-   ```
+4. Copy `cookies.txt` to the device SD card as `data/yt-dlp-cookies.txt`
 
 Restart SideB and pending downloads will resume automatically.
 
-> **Tip:** Firefox also works — replace `chrome` with `firefox` in step 2.
+> **Why not Chrome?** Since late 2024, Chrome automatically invalidates exported cookies as a security measure. Firefox does not have this limitation.
 
 ## Build 🔧
 
