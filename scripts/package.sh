@@ -22,18 +22,38 @@ require_file() {
   fi
 }
 
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "ERROR: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
 copy_resource_tree() {
   local dest="$1"
   mkdir -p "$dest"
 
-  local resource
-  for resource in "$package_source"/resources/*; do
-    [ -f "$resource" ] || continue
-    case "${resource##*/}" in
-      *.png|*.ttf|*.crt)
-        cp "$resource" "$dest/"
-        ;;
-    esac
+  local resource_name
+  for resource_name in \
+    tapeA.png \
+    play.png \
+    fav.png \
+    fav_on.png \
+    taperoll.png \
+    font_mono.ttf \
+    font_mono_bak.ttf \
+    tapeBase.png \
+    pause.png \
+    fav_off.png \
+    wheel.png \
+    cover_mask.png \
+    spotify_off.png \
+    icon.png \
+    spotify_on.png \
+    ca-certificates.crt
+  do
+    require_file "$package_source/resources/$resource_name"
+    cp "$package_source/resources/$resource_name" "$dest/"
   done
 }
 
@@ -73,6 +93,94 @@ build_platform_package() {
   echo "Built: $dist_root/$asset_name"
 }
 
+zip_has_entry() {
+  local zip_path="$1"
+  local entry="$2"
+  zipinfo -1 "$zip_path" | grep -Fx -- "$entry" >/dev/null
+}
+
+zip_has_prefix() {
+  local zip_path="$1"
+  local prefix="$2"
+  zipinfo -1 "$zip_path" | awk -v prefix="$prefix" 'index($0, prefix) == 1 { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+assert_zip_entry() {
+  local zip_path="$1"
+  local entry="$2"
+  if ! zip_has_entry "$zip_path" "$entry"; then
+    echo "ERROR: $zip_path is missing zip entry $entry" >&2
+    exit 1
+  fi
+}
+
+assert_zip_no_entry() {
+  local zip_path="$1"
+  local entry="$2"
+  if zip_has_entry "$zip_path" "$entry"; then
+    echo "ERROR: $zip_path unexpectedly contains zip entry $entry" >&2
+    exit 1
+  fi
+}
+
+assert_zip_no_prefix() {
+  local zip_path="$1"
+  local prefix="$2"
+  if zip_has_prefix "$zip_path" "$prefix"; then
+    echo "ERROR: $zip_path unexpectedly contains entries under $prefix" >&2
+    exit 1
+  fi
+}
+
+validate_zip_layout() {
+  local platform="$1"
+  local root="$2"
+  local zip_path="$dist_root/SideB-${version}-${platform}.zip"
+
+  require_file "$zip_path"
+
+  assert_zip_entry "$zip_path" "${root}launch.sh"
+  assert_zip_entry "$zip_path" "${root}sideb"
+  assert_zip_entry "$zip_path" "${root}go-librespot"
+  assert_zip_entry "$zip_path" "${root}yt-dlp"
+  assert_zip_entry "$zip_path" "${root}ffmpeg-lite"
+  assert_zip_entry "$zip_path" "${root}data/config.yml"
+  assert_zip_entry "$zip_path" "${root}resources/tapeBase.png"
+  assert_zip_entry "$zip_path" "${root}resources/font_mono.ttf"
+  assert_zip_entry "$zip_path" "${root}LICENSES/NOTICE.md"
+  assert_zip_entry "$zip_path" "${root}LICENSES/THIRD_PARTY_SOURCES.md"
+  assert_zip_no_entry "$zip_path" "${root}resources/Fullscreen - Mesh Grid.png"
+}
+
+validate_release_packages() {
+  local pak_release_filename
+  pak_release_filename=$(sed -n 's/^  "release_filename": "\(.*\)",$/\1/p' "$repo_root/pak.json" | head -n 1)
+
+  if [ "$pak_release_filename" != "SideB-${version}-nextui.zip" ]; then
+    echo "ERROR: pak.json release_filename ($pak_release_filename) does not match SideB-${version}-nextui.zip" >&2
+    exit 1
+  fi
+
+  require_file "$dist_root/$pak_release_filename"
+
+  validate_zip_layout "nextui" ""
+  assert_zip_no_prefix "$dist_root/SideB-${version}-nextui.zip" "Tools/"
+  assert_zip_no_prefix "$dist_root/SideB-${version}-nextui.zip" "Apps/"
+
+  validate_zip_layout "stock" "Apps/SideB/"
+  assert_zip_no_prefix "$dist_root/SideB-${version}-stock.zip" "Tools/"
+  assert_zip_no_entry "$dist_root/SideB-${version}-stock.zip" "launch.sh"
+  assert_zip_entry "$dist_root/SideB-${version}-stock.zip" "Apps/SideB/config.json"
+
+  validate_zip_layout "crossmix" "Apps/SideB/"
+  assert_zip_no_prefix "$dist_root/SideB-${version}-crossmix.zip" "Tools/"
+  assert_zip_no_entry "$dist_root/SideB-${version}-crossmix.zip" "launch.sh"
+  assert_zip_entry "$dist_root/SideB-${version}-crossmix.zip" "Apps/SideB/config.json"
+
+  echo "OK: release zip layouts match pak store and manual install expectations"
+}
+
+require_command zipinfo
 require_file "$package_source/go-librespot"
 require_file "$package_source/yt-dlp"
 require_file "$package_source/ffmpeg-lite"
@@ -92,8 +200,13 @@ echo "Building sideb $version for $target_triple"
 )
 require_file "$binary_path"
 
-build_platform_package "nextui" "Tools/tg5040/SideB.pak"
+# Pak Store extracts TOOL zip assets into /mnt/SDCARD/Tools/<platform>/<name>.pak.
+# Keep the NextUI archive rooted at the pak contents to avoid a nested
+# Tools/tg5040/SideB.pak/Tools/tg5040/SideB.pak install.
+build_platform_package "nextui" "."
 build_platform_package "stock" "Apps/SideB"
 build_platform_package "crossmix" "Apps/SideB"
+
+validate_release_packages
 
 echo "Done. Release zips are in $dist_root"

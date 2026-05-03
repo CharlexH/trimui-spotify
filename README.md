@@ -2,12 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.6`
+Latest release: `v1.0.7`
 
-- Major performance optimization: 3x faster rendering (87ms → 25ms per frame at 30 FPS)
-- Eliminated CPU busy-waiting in network thread, reduced idle polling overhead
-- Fast alpha blending with bit-shift approximation for ARM, optimized drawing primitives
-- Reduced device temperature by ~25°C during playback
+- Fixed NextUI Pak Store install layout so SideB launches from the menu after store installation
+- NextUI release archive now contains pak contents at the archive root, matching Pak Store requirements
+- Stock and CrossMix release archive layouts are unchanged
 
 ## Screenshots 📸
 
@@ -184,9 +183,9 @@ This produces:
 - `dist/SideB-<version>-stock.zip`
 - `dist/SideB-<version>-crossmix.zip`
 
-Each archive already contains the correct SD-card root layout:
+Archive layouts:
 
-- `nextui`: `Tools/tg5040/SideB.pak/...`
+- `nextui`: pak contents such as `launch.sh`, `sideb`, `resources/...`, and `data/...`; the NextUI Pak Store extracts this archive into `Tools/tg5040/SideB.pak/`
 - `stock`: `Apps/SideB/...`
 - `crossmix`: `Apps/SideB/...`
 
@@ -198,12 +197,12 @@ Supported in this release:
 
 ## Deploy 🚀
 
-Manual install paths:
+Manual installation:
 
 ```text
-NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/
-Stock    -> /mnt/SDCARD/Apps/SideB/
-CrossMix -> /mnt/SDCARD/Apps/SideB/
+NextUI   -> extract the nextui archive into /mnt/SDCARD/Tools/tg5040/SideB.pak/
+Stock    -> extract the stock archive at the SD-card root so it creates /mnt/SDCARD/Apps/SideB/
+CrossMix -> extract the crossmix archive at the SD-card root so it creates /mnt/SDCARD/Apps/SideB/
 ```
 
 Launch **SideB** from the TrimUI app menu, then select **TrimUI Brick** from Spotify Connect on another device.
@@ -218,7 +217,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.6`
+Current release tag: `v1.0.7`
 
 ## Repo Layout 🗂️
 
