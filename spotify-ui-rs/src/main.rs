@@ -2,7 +2,9 @@
 
 mod animation;
 mod app;
+mod battery;
 mod constants;
+mod display;
 mod download;
 mod drawing;
 mod favorites;
@@ -17,6 +19,7 @@ mod mode;
 mod network;
 mod paths;
 mod playlist_view;
+mod power;
 mod render;
 mod resources;
 mod types;
@@ -99,6 +102,12 @@ fn main() {
         assets.spotify_off,
         assets.fav_on,
         assets.fav_off,
+        assets.bat0,
+        assets.bat25,
+        assets.bat50,
+        assets.bat75,
+        assets.bat100,
+        assets.bat_charging,
         &fonts,
     );
     eprintln!("render caches ready");
@@ -132,6 +141,8 @@ fn main() {
     // Create download manager (spawns its own background thread)
     let download_manager = DownloadManager::new(Arc::clone(&favorites), Arc::clone(&app_state));
     let download_progress = Arc::clone(download_manager.progress());
+
+    battery::refresh_app_state(&app_state);
 
     // Resume incomplete downloads from previous session
     {
@@ -222,12 +233,23 @@ fn main() {
     let poll_state = Arc::clone(&app_state);
     let poll_render = Arc::clone(&render_state);
     let poll_quit = Arc::clone(&quit);
+    let poll_cmd_tx = cmd_tx.clone();
     let _poll_handle = std::thread::Builder::new()
         .name("status-poll".into())
         .spawn(move || {
-            network::poll_status(poll_state, poll_render, poll_quit);
+            network::poll_status(poll_state, poll_render, poll_quit, poll_cmd_tx);
         })
         .expect("spawn status poll thread");
+
+    // Spawn low-frequency battery polling thread.
+    let battery_state = Arc::clone(&app_state);
+    let battery_quit = Arc::clone(&quit);
+    let _battery_handle = std::thread::Builder::new()
+        .name("battery".into())
+        .spawn(move || {
+            battery::run(battery_state, battery_quit);
+        })
+        .expect("spawn battery thread");
 
     // Spawn command processor thread
     let cmd_app_state = Arc::clone(&app_state);
@@ -283,6 +305,24 @@ fn main() {
             );
         })
         .expect("spawn local monitor thread");
+
+    // Spawn stop-to-suspend monitor. It only releases keepalive files after
+    // playback has been stopped through the grace period and final re-check.
+    let power_state = Arc::clone(&app_state);
+    let power_local_player = Arc::clone(&local_player);
+    let power_download_progress = Arc::clone(&download_progress);
+    let power_quit = Arc::clone(&quit);
+    let _power_handle = std::thread::Builder::new()
+        .name("power".into())
+        .spawn(move || {
+            power::run_sleep_monitor(
+                power_state,
+                power_local_player,
+                power_download_progress,
+                power_quit,
+            );
+        })
+        .expect("spawn power monitor thread");
 
     // Run render loop on main thread
     let render_quit = Arc::clone(&quit);
@@ -356,12 +396,53 @@ fn command_processor(
     download_manager: DownloadManager,
     quit: Arc<AtomicBool>,
 ) {
+    let mut screen_backlight = display::ScreenBacklight::new();
+
     for action in rx.iter() {
         if quit.load(Ordering::Relaxed) {
             return;
         }
 
         match action {
+            InputAction::LockScreen => {
+                let (mode, paused) = {
+                    let st = app_state.lock().unwrap();
+                    (st.mode, st.paused)
+                };
+
+                match mode {
+                    AppMode::Spotify if !paused => {
+                        network::api_post("/player/pause");
+                    }
+                    AppMode::Local => {
+                        let mut player = local_player.lock().unwrap();
+                        if player.is_playing() {
+                            player.pause();
+                        }
+                    }
+                    _ => {}
+                }
+
+                {
+                    let mut st = app_state.lock().unwrap();
+                    st.clear_confirmation();
+                    st.set_playlist_visible(false);
+                    if mode != AppMode::Waiting {
+                        st.set_paused(true);
+                    }
+                    st.set_stop_to_sleep_eligible(false);
+                    st.set_screen_locked(true);
+                }
+                screen_backlight.lock();
+                eprintln!("cmd: screen locked");
+            }
+
+            InputAction::UnlockScreen => {
+                screen_backlight.unlock();
+                app_state.lock().unwrap().set_screen_locked(false);
+                eprintln!("cmd: screen unlocked");
+            }
+
             InputAction::RequestExit => {
                 let mut st = app_state.lock().unwrap();
                 let now = Instant::now();
@@ -503,6 +584,7 @@ fn command_processor(
             }
 
             InputAction::TogglePlayPause => {
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let mut player = local_player.lock().unwrap();
                 if player.is_active() {
                     player.toggle_pause();
@@ -528,6 +610,7 @@ fn command_processor(
             }
 
             InputAction::NextTrack => {
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
                 player.refresh_playlist(downloaded);
@@ -541,6 +624,7 @@ fn command_processor(
             }
 
             InputAction::PrevTrack => {
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
                 let mut player = local_player.lock().unwrap();
                 player.refresh_playlist(downloaded);
@@ -563,6 +647,7 @@ fn command_processor(
             }
 
             InputAction::StartLocalPlayback => {
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 // Pause Spotify first to prevent audio overlap
                 network::api_post("/player/pause");
 
@@ -589,9 +674,21 @@ fn command_processor(
             InputAction::StopLocalPlayback => {
                 let mut player = local_player.lock().unwrap();
                 player.stop();
+                drop(player);
+                let downloads_active = !download_manager.progress().lock().unwrap().is_empty();
                 let mut st = app_state.lock().unwrap();
-                st.set_mode(AppMode::Local);
+                st.set_mode(AppMode::Waiting);
                 st.set_paused(true);
+                st.current_track_uri.clear();
+                st.track_name.clear();
+                st.artist_name.clear();
+                st.album_name.clear();
+                st.set_duration(0);
+                st.set_position(0, Instant::now());
+                st.set_favorited(false);
+                st.set_stop_to_sleep_eligible(!downloads_active);
+                drop(st);
+                network::update_cover(None, &render_state);
             }
 
             InputAction::TogglePlaylist => {
@@ -636,6 +733,7 @@ fn command_processor(
                     drop(fav);
 
                     if entry.downloaded && entry.file_path.is_some() {
+                        app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                         // Pause Spotify first to prevent audio overlap
                         network::api_post("/player/pause");
 
@@ -730,6 +828,12 @@ fn command_processor(
             }
 
             InputAction::SpotifyActivated => {
+                if app_state.lock().unwrap().screen_locked {
+                    screen_backlight.unlock();
+                    app_state.lock().unwrap().set_screen_locked(false);
+                    eprintln!("cmd: screen unlocked by Spotify activation");
+                }
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let (local_active, remembered_uri) = {
                     let player = local_player.lock().unwrap();
                     (
@@ -741,6 +845,7 @@ fn command_processor(
                 let mut st = app_state.lock().unwrap();
                 st.set_mode(AppMode::Spotify);
                 st.set_paused(false);
+                st.spotify_was_active = true;
 
                 if local_active {
                     st.spotify_preempted_local_uri = remembered_uri.clone();
@@ -756,19 +861,29 @@ fn command_processor(
             }
 
             InputAction::SpotifyTrackChanged => {
+                if app_state.lock().unwrap().screen_locked {
+                    screen_backlight.unlock();
+                    app_state.lock().unwrap().set_screen_locked(false);
+                    eprintln!("cmd: screen unlocked by Spotify track change");
+                }
+                app_state.lock().unwrap().set_stop_to_sleep_eligible(false);
                 let st = app_state.lock().unwrap();
                 let uri = st.current_track_uri.clone();
                 drop(st);
                 let is_fav = favorites.lock().unwrap().is_favorited(&uri);
-                app_state.lock().unwrap().set_favorited(is_fav);
+                let mut st = app_state.lock().unwrap();
+                st.spotify_was_active = true;
+                st.set_favorited(is_fav);
             }
 
             InputAction::SpotifyDeactivated => {
-                let remembered_uri = app_state
-                    .lock()
-                    .unwrap()
-                    .spotify_preempted_local_uri
-                    .clone();
+                let (remembered_uri, spotify_was_active) = {
+                    let st = app_state.lock().unwrap();
+                    (
+                        st.spotify_preempted_local_uri.clone(),
+                        st.spotify_was_active,
+                    )
+                };
                 let downloaded = favorites.lock().unwrap().downloaded_entries();
 
                 if let Some(entry) =
@@ -785,6 +900,8 @@ fn command_processor(
                     st.set_duration(entry.duration_ms.unwrap_or(0));
                     st.set_position(0, Instant::now());
                     st.set_favorited(true);
+                    st.spotify_was_active = false;
+                    st.set_stop_to_sleep_eligible(false);
                     drop(st);
                     load_local_cover(&entry, &render_state);
                     eprintln!(
@@ -792,6 +909,7 @@ fn command_processor(
                         entry.uri
                     );
                 } else {
+                    let downloads_active = !download_manager.progress().lock().unwrap().is_empty();
                     let mut st = app_state.lock().unwrap();
                     st.set_mode(AppMode::Waiting);
                     st.spotify_preempted_local_uri = None;
@@ -802,6 +920,13 @@ fn command_processor(
                     st.set_duration(0);
                     st.set_position(0, Instant::now());
                     st.set_favorited(false);
+                    st.spotify_was_active = false;
+                    st.set_stop_to_sleep_eligible(
+                        should_enable_stop_sleep_after_spotify_deactivated(
+                            spotify_was_active,
+                            downloads_active,
+                        ),
+                    );
                     drop(st);
                     network::update_cover(None, &render_state);
                     eprintln!("cmd: Spotify deactivated, no local restore target");
@@ -835,6 +960,13 @@ fn advance_playlist_selection(selected: usize, count: usize, movement: PlaylistM
             }
         }
     }
+}
+
+fn should_enable_stop_sleep_after_spotify_deactivated(
+    spotify_was_active: bool,
+    downloads_active: bool,
+) -> bool {
+    spotify_was_active && !downloads_active
 }
 
 fn select_local_restore_target<'a>(
@@ -1200,6 +1332,19 @@ mod tests {
         let target = select_local_restore_target(&downloaded, Some("missing"))
             .map(|entry| entry.uri.clone());
         assert_eq!(target.as_deref(), Some("track:1"));
+    }
+
+    #[test]
+    fn spotify_stop_sleep_requires_prior_active_session_and_no_downloads() {
+        assert!(!should_enable_stop_sleep_after_spotify_deactivated(
+            false, false
+        ));
+        assert!(!should_enable_stop_sleep_after_spotify_deactivated(
+            true, true
+        ));
+        assert!(should_enable_stop_sleep_after_spotify_deactivated(
+            true, false
+        ));
     }
 
     #[test]

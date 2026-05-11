@@ -52,8 +52,9 @@ pub const HINTS_BASELINE_Y: i32 = 736;
 // Bottom bar icons (all 32x32)
 pub const BAR_ICON_SIZE: i32 = 32;
 pub const BAR_ICON_Y: i32 = 651;
-pub const SPOTIFY_ICON_X: i32 = 20;
-pub const FAV_ICON_X: i32 = 68;
+pub const BATTERY_ICON_X: i32 = 20;
+pub const SPOTIFY_ICON_X: i32 = 68;
+pub const FAV_ICON_X: i32 = 116;
 pub const PLAY_ICON_MARGIN: i32 = 8;
 
 // API
@@ -70,6 +71,7 @@ pub const ABS_HAT0X: u16 = 0x10;
 pub const ABS_HAT0Y: u16 = 0x11;
 pub const BTN_START: u16 = 315;
 pub const KEY_MENU: u16 = 139;
+pub const KEY_POWER: u16 = 116;
 
 // Debounce
 pub const DEBOUNCE_MS: u128 = 500;

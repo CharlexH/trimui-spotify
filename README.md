@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.7`
+Latest release: `v1.0.8`
 
-- Fixed NextUI Pak Store install layout so SideB launches from the menu after store installation
-- NextUI release archive now contains pak contents at the archive root, matching Pak Store requirements
-- Stock and CrossMix release archive layouts are unchanged
+- Added a compact battery icon to the status bar with level and charging states
+- Added SideB Lock, which turns the screen off and pauses active playback
+- Improved playback-aware sleep handling so SideB avoids suspending while playback or downloads are active
 
 ## Screenshots 📸
 
@@ -167,7 +167,8 @@ cp target/aarch64-unknown-linux-musl/release/sideb ../package/SideB.pak/sideb
 - `package/SideB.pak/ffmpeg-lite` — bundled FFmpeg-compatible audio transcoder with MP3 encoder support; a minimal audio-focused build is sufficient
 - `package/SideB.pak/yt-dlp` — YouTube audio downloader (aarch64 binary)
 - `package/SideB.pak/resources/ca-certificates.crt` — TLS root certificates
-- `package/SideB.pak/resources/font_mono.ttf` — UI font
+
+`package/SideB.pak/resources/font_mono.ttf` is tracked and should already be present after checkout.
 
 ## Package Releases 📦
 
@@ -217,7 +218,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.7`
+Current release tag: `v1.0.8`
 
 ## Repo Layout 🗂️
 

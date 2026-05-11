@@ -147,7 +147,10 @@ impl FavoritesManager {
             entry.downloaded = true;
             entry.file_path = Some(file_path.to_string());
             entry.duration_ms = duration_ms;
-            eprintln!("favorites: marked downloaded {} - {}", entry.artist, entry.name);
+            eprintln!(
+                "favorites: marked downloaded {} - {}",
+                entry.artist, entry.name
+            );
             self.save();
         }
     }
@@ -202,7 +205,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn test_entry(uri: &str, file_path: Option<String>, cover_path: Option<String>) -> FavoriteEntry {
+    fn test_entry(
+        uri: &str,
+        file_path: Option<String>,
+        cover_path: Option<String>,
+    ) -> FavoriteEntry {
         FavoriteEntry {
             uri: uri.to_string(),
             name: "Track".to_string(),

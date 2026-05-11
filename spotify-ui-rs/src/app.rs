@@ -37,11 +37,16 @@ pub struct AppState {
     pub soundwave_goals: [f64; 24],
     pub status_sync_boost_until: Instant,
     pub render_dirty: bool,
+    pub battery_percent: Option<u8>,
+    pub battery_charging: bool,
+    pub screen_locked: bool,
 
     // -- Mode & local playback --
     pub mode: AppMode,
     pub is_favorited: bool,
     pub spotify_preempted_local_uri: Option<String>,
+    pub spotify_was_active: bool,
+    pub stop_to_sleep_eligible: bool,
 
     // -- Playlist overlay --
     pub playlist_visible: bool,
@@ -76,10 +81,15 @@ impl AppState {
             soundwave_goals: goals,
             status_sync_boost_until: Instant::now(),
             render_dirty: false,
+            battery_percent: None,
+            battery_charging: false,
+            screen_locked: false,
 
             mode: AppMode::default(),
             is_favorited: false,
             spotify_preempted_local_uri: None,
+            spotify_was_active: false,
+            stop_to_sleep_eligible: false,
 
             playlist_visible: false,
             playlist_selected: 0,
@@ -165,6 +175,26 @@ impl AppState {
         }
     }
 
+    pub fn set_battery_percent(&mut self, percent: Option<u8>) {
+        self.set_battery_snapshot(percent, self.battery_charging);
+    }
+
+    pub fn set_battery_snapshot(&mut self, percent: Option<u8>, charging: bool) {
+        let percent = percent.filter(|value| *value <= 100);
+        if self.battery_percent != percent || self.battery_charging != charging {
+            self.battery_percent = percent;
+            self.battery_charging = charging;
+            self.render_dirty = true;
+        }
+    }
+
+    pub fn set_screen_locked(&mut self, locked: bool) {
+        if self.screen_locked != locked {
+            self.screen_locked = locked;
+            self.render_dirty = true;
+        }
+    }
+
     pub fn set_volume(&mut self, volume: i32, volume_max: i32) {
         if self.volume != volume || self.volume_max != volume_max {
             self.volume = volume;
@@ -200,6 +230,10 @@ impl AppState {
             self.is_favorited = favorited;
             self.render_dirty = true;
         }
+    }
+
+    pub fn set_stop_to_sleep_eligible(&mut self, eligible: bool) {
+        self.stop_to_sleep_eligible = eligible;
     }
 
     pub fn set_playlist_visible(&mut self, visible: bool) {
@@ -265,6 +299,63 @@ mod tests {
         );
         assert!(state.confirmation.is_none());
     }
+
+    #[test]
+    fn battery_percent_changes_mark_render_dirty_once() {
+        let mut state = AppState::new();
+        assert_eq!(state.battery_percent, None);
+
+        state.set_battery_percent(Some(87));
+        assert_eq!(state.battery_percent, Some(87));
+        assert!(state.render_dirty);
+
+        state.render_dirty = false;
+        state.set_battery_percent(Some(87));
+        assert!(!state.render_dirty);
+
+        state.set_battery_percent(None);
+        assert_eq!(state.battery_percent, None);
+        assert!(state.render_dirty);
+    }
+
+    #[test]
+    fn battery_charging_changes_mark_render_dirty_once() {
+        let mut state = AppState::new();
+        assert_eq!(state.battery_percent, None);
+        assert!(!state.battery_charging);
+
+        state.set_battery_snapshot(Some(50), true);
+        assert_eq!(state.battery_percent, Some(50));
+        assert!(state.battery_charging);
+        assert!(state.render_dirty);
+
+        state.render_dirty = false;
+        state.set_battery_snapshot(Some(50), true);
+        assert!(!state.render_dirty);
+
+        state.set_battery_snapshot(Some(50), false);
+        assert_eq!(state.battery_percent, Some(50));
+        assert!(!state.battery_charging);
+        assert!(state.render_dirty);
+    }
+
+    #[test]
+    fn screen_lock_changes_mark_render_dirty_once() {
+        let mut state = AppState::new();
+        assert!(!state.screen_locked);
+
+        state.set_screen_locked(true);
+        assert!(state.screen_locked);
+        assert!(state.render_dirty);
+
+        state.render_dirty = false;
+        state.set_screen_locked(true);
+        assert!(!state.render_dirty);
+
+        state.set_screen_locked(false);
+        assert!(!state.screen_locked);
+        assert!(state.render_dirty);
+    }
 }
 
 /// Immutable assets loaded at startup.
@@ -280,6 +371,12 @@ pub struct Assets {
     pub spotify_off: Option<RgbaImage>,
     pub fav_on: Option<RgbaImage>,
     pub fav_off: Option<RgbaImage>,
+    pub bat0: Option<RgbaImage>,
+    pub bat25: Option<RgbaImage>,
+    pub bat50: Option<RgbaImage>,
+    pub bat75: Option<RgbaImage>,
+    pub bat100: Option<RgbaImage>,
+    pub bat_charging: Option<RgbaImage>,
 }
 
 impl Assets {
@@ -299,6 +396,12 @@ impl Assets {
             spotify_off: load_image_resource("spotify_off.png"),
             fav_on: load_image_resource("fav_on.png"),
             fav_off: load_image_resource("fav_off.png"),
+            bat0: load_image_resource("bat0.png"),
+            bat25: load_image_resource("bat25.png"),
+            bat50: load_image_resource("bat50.png"),
+            bat75: load_image_resource("bat75.png"),
+            bat100: load_image_resource("bat100.png"),
+            bat_charging: load_image_resource("bat_charging.png"),
         }
     }
 }

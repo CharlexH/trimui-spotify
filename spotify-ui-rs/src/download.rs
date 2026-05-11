@@ -73,10 +73,7 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     /// Create a new manager and spawn the background download thread.
-    pub fn new(
-        favorites: Arc<Mutex<FavoritesManager>>,
-        app_state: Arc<Mutex<AppState>>,
-    ) -> Self {
+    pub fn new(favorites: Arc<Mutex<FavoritesManager>>, app_state: Arc<Mutex<AppState>>) -> Self {
         let (tx, rx) = mpsc::channel::<DownloadRequest>();
         let pending_uris = Arc::new(Mutex::new(HashSet::new()));
         let pending_clone = Arc::clone(&pending_uris);
@@ -90,7 +87,11 @@ impl DownloadManager {
             })
             .expect("spawn download thread");
 
-        Self { tx, pending_uris, progress }
+        Self {
+            tx,
+            pending_uris,
+            progress,
+        }
     }
 
     /// Get a reference to the shared progress map for UI rendering.
@@ -113,7 +114,10 @@ impl DownloadManager {
         let artist_name = request.artist_name.clone();
         let track_name = request.track_name.clone();
         // Mark as queued in progress map immediately so UI shows it
-        self.progress.lock().unwrap().insert(uri.clone(), DownloadPhase::Queued);
+        self.progress
+            .lock()
+            .unwrap()
+            .insert(uri.clone(), DownloadPhase::Queued);
 
         if let Err(e) = self.tx.send(request) {
             eprintln!("download: enqueue failed: {e}");
@@ -279,7 +283,14 @@ fn score_candidate(candidate: &SearchCandidate, request: &DownloadRequest) -> f6
     // Negative signals — penalize covers/remixes unless the Spotify title has them too
     let cand_lower = candidate.title.to_lowercase();
     let req_lower = request.track_name.to_lowercase();
-    for keyword in &["cover", "remix", "live", "karaoke", "instrumental", "acoustic"] {
+    for keyword in &[
+        "cover",
+        "remix",
+        "live",
+        "karaoke",
+        "instrumental",
+        "acoustic",
+    ] {
         if cand_lower.contains(keyword) && !req_lower.contains(keyword) {
             score -= 15.0;
         }
@@ -361,18 +372,21 @@ fn download_loop(
             let fav = favorites.lock().unwrap();
             if !fav.is_favorited(&req.uri) {
                 eprintln!("download: skipping (unfavorited): {}", req.uri);
-                pending_uris.lock().unwrap().remove(&req.uri);
+                clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
                 continue;
             }
             if fav.find_by_uri(&req.uri).map_or(false, |e| e.downloaded) {
                 eprintln!("download: skipping (already downloaded): {}", req.uri);
-                pending_uris.lock().unwrap().remove(&req.uri);
+                clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
                 continue;
             }
         }
 
         // Move to searching phase
-        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Searching);
+        progress
+            .lock()
+            .unwrap()
+            .insert(req.uri.clone(), DownloadPhase::Searching);
         mark_dirty(&app_state);
 
         let music_dir = app_paths().music_dir.clone();
@@ -405,11 +419,7 @@ fn download_loop(
         let output_template = output_path.to_string_lossy().to_string();
         let cookies = resolve_cookies_path();
 
-        let candidates = search_candidates(
-            &search_query,
-            CANDIDATE_COUNT,
-            cookies.as_deref(),
-        );
+        let candidates = search_candidates(&search_query, CANDIDATE_COUNT, cookies.as_deref());
 
         let success = if candidates.is_empty() {
             eprintln!("download: no candidates found, falling back to direct search");
@@ -472,9 +482,7 @@ fn download_loop(
         }
 
         // Clear progress entry and notify UI
-        progress.lock().unwrap().remove(&req.uri);
-        mark_dirty(&app_state);
-        pending_uris.lock().unwrap().remove(&req.uri);
+        clear_download_bookkeeping(&req.uri, &pending_uris, &progress, &app_state);
     }
 }
 
@@ -482,6 +490,17 @@ fn mark_dirty(app_state: &Arc<Mutex<AppState>>) {
     if let Ok(mut st) = app_state.lock() {
         st.render_dirty = true;
     }
+}
+
+fn clear_download_bookkeeping(
+    uri: &str,
+    pending_uris: &Arc<Mutex<HashSet<String>>>,
+    progress: &DownloadProgressMap,
+    app_state: &Arc<Mutex<AppState>>,
+) {
+    progress.lock().unwrap().remove(uri);
+    pending_uris.lock().unwrap().remove(uri);
+    mark_dirty(app_state);
 }
 
 /// Try downloading each scored candidate in order, with post-download validation.
@@ -497,12 +516,18 @@ fn try_candidates_download(
 ) -> bool {
     for (rank, (score, cand)) in scored.iter().enumerate() {
         if !favorites.lock().unwrap().is_favorited(&req.uri) {
-            eprintln!("download: skipping (unfavorited during search): {}", req.uri);
+            eprintln!(
+                "download: skipping (unfavorited during search): {}",
+                req.uri
+            );
             return false;
         }
 
         // Reset progress for each new candidate attempt
-        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
+        progress
+            .lock()
+            .unwrap()
+            .insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
         mark_dirty(app_state);
 
         let yt_url = format!("https://www.youtube.com/watch?v={}", cand.id);
@@ -514,7 +539,15 @@ fn try_candidates_download(
             req.uri
         );
 
-        if download_single_url(&yt_url, output_template, cookies, &req.uri, progress, app_state, req.spotify_duration_ms) {
+        if download_single_url(
+            &yt_url,
+            output_template,
+            cookies,
+            &req.uri,
+            progress,
+            app_state,
+            req.spotify_duration_ms,
+        ) {
             match validate_downloaded_track(output_path, req.spotify_duration_ms) {
                 Ok(_) => return true,
                 Err(reason) => {
@@ -608,12 +641,18 @@ fn download_single_url(
             if mp3_exists && !saw_mp3 {
                 // mp3 appeared — transcoding phase
                 saw_mp3 = true;
-                poll_progress.lock().unwrap().insert(poll_uri.clone(), DownloadPhase::Transcoding);
+                poll_progress
+                    .lock()
+                    .unwrap()
+                    .insert(poll_uri.clone(), DownloadPhase::Transcoding);
                 mark_dirty(&poll_app_state);
             } else if intermediate_size > 0 && !saw_mp3 {
                 // Still downloading intermediate format
                 let pct = (intermediate_size as f32 / expected_bytes as f32).clamp(0.01, 0.95);
-                poll_progress.lock().unwrap().insert(poll_uri.clone(), DownloadPhase::Downloading(pct));
+                poll_progress
+                    .lock()
+                    .unwrap()
+                    .insert(poll_uri.clone(), DownloadPhase::Downloading(pct));
                 mark_dirty(&poll_app_state);
             }
         }
@@ -681,7 +720,10 @@ fn try_direct_download(
         }
 
         // Reset progress for retry
-        progress.lock().unwrap().insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
+        progress
+            .lock()
+            .unwrap()
+            .insert(req.uri.clone(), DownloadPhase::Downloading(0.0));
         mark_dirty(app_state);
 
         eprintln!(
@@ -693,7 +735,15 @@ fn try_direct_download(
         );
 
         let search_url = format!("ytsearch1:{}", search_query);
-        if download_single_url(&search_url, output_template, cookies, &req.uri, progress, app_state, req.spotify_duration_ms) {
+        if download_single_url(
+            &search_url,
+            output_template,
+            cookies,
+            &req.uri,
+            progress,
+            app_state,
+            req.spotify_duration_ms,
+        ) {
             match validate_downloaded_track(output_path, req.spotify_duration_ms) {
                 Ok(_) => return true,
                 Err(reason) => {
@@ -795,7 +845,10 @@ fn probe_duration(path: &Path) -> Option<i64> {
     {
         Ok(output) => output,
         Err(e) => {
-            eprintln!("download: ffprobe launch failed for {}: {e}", path.display());
+            eprintln!(
+                "download: ffprobe launch failed for {}: {e}",
+                path.display()
+            );
             return None;
         }
     };
@@ -927,7 +980,9 @@ mod tests {
 
     #[test]
     fn title_similarity_exact_match_returns_one() {
-        assert!((title_similarity("Komm, Susser Tod", "Komm, Susser Tod") - 1.0).abs() < f64::EPSILON);
+        assert!(
+            (title_similarity("Komm, Susser Tod", "Komm, Susser Tod") - 1.0).abs() < f64::EPSILON
+        );
     }
 
     #[test]
@@ -939,7 +994,9 @@ mod tests {
 
     #[test]
     fn title_similarity_no_overlap_returns_zero() {
-        assert!(title_similarity("Something Else Entirely", "Komm, Susser Tod").abs() < f64::EPSILON);
+        assert!(
+            title_similarity("Something Else Entirely", "Komm, Susser Tod").abs() < f64::EPSILON
+        );
     }
 
     #[test]
@@ -949,7 +1006,9 @@ mod tests {
 
     #[test]
     fn title_similarity_is_case_insensitive() {
-        assert!((title_similarity("KOMM SUSSER TOD", "komm susser tod") - 1.0).abs() < f64::EPSILON);
+        assert!(
+            (title_similarity("KOMM SUSSER TOD", "komm susser tod") - 1.0).abs() < f64::EPSILON
+        );
     }
 
     // --- Candidate scoring ---
@@ -979,7 +1038,10 @@ mod tests {
         };
         let score = score_candidate(&cand, &req);
         // 0 (duration >30s off) + 25 (title match) + 0 (no Topic) = 25
-        assert!(score <= 30.0, "expected low score for wrong duration, got {score}");
+        assert!(
+            score <= 30.0,
+            "expected low score for wrong duration, got {score}"
+        );
     }
 
     #[test]
@@ -1076,7 +1138,10 @@ mod tests {
 
     #[test]
     fn parse_progress_ignores_destination_line() {
-        assert_eq!(parse_ytdlp_progress("[download] Destination: file.webm"), None);
+        assert_eq!(
+            parse_ytdlp_progress("[download] Destination: file.webm"),
+            None
+        );
     }
 
     #[test]
@@ -1112,5 +1177,25 @@ mod tests {
     fn overall_progress_transcoding_is_in_last_quarter() {
         let p = DownloadPhase::Transcoding.overall_progress();
         assert!(p >= 0.75 && p <= 1.0);
+    }
+
+    #[test]
+    fn clear_download_bookkeeping_removes_progress_and_pending_state() {
+        let uri = "spotify:track:queued";
+        let pending = Arc::new(Mutex::new(HashSet::new()));
+        let progress: DownloadProgressMap = Arc::new(Mutex::new(HashMap::new()));
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+
+        pending.lock().unwrap().insert(uri.to_string());
+        progress
+            .lock()
+            .unwrap()
+            .insert(uri.to_string(), DownloadPhase::Queued);
+
+        clear_download_bookkeeping(uri, &pending, &progress, &app_state);
+
+        assert!(!pending.lock().unwrap().contains(uri));
+        assert!(!progress.lock().unwrap().contains_key(uri));
+        assert!(app_state.lock().unwrap().render_dirty);
     }
 }

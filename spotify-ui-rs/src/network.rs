@@ -12,6 +12,7 @@ use tungstenite::{connect, Message, WebSocket};
 
 use crate::app::AppState;
 use crate::constants::API_BASE;
+use crate::mode::InputAction;
 use crate::render::{CoverUpdate, RenderState};
 use crate::resources;
 use crate::types::*;
@@ -135,6 +136,8 @@ fn apply_track_snapshot(
     state.set_connected(true);
     state.set_paused(paused);
     state.set_volume(volume, volume_steps);
+    state.spotify_was_active = true;
+    state.set_stop_to_sleep_eligible(false);
 
     let should_sync_position = match position_threshold_ms {
         None => true,
@@ -157,11 +160,25 @@ fn apply_track_snapshot(
     }
 }
 
+fn clear_spotify_playback_snapshot(state: &mut AppState, now: Instant) {
+    state.set_connected(false);
+    state.set_paused(true);
+    state.current_track_uri.clear();
+    state.track_name.clear();
+    state.artist_name.clear();
+    state.album_name.clear();
+    state.set_duration(0);
+    state.set_position(0, now);
+    state.set_favorited(false);
+    state.set_stop_to_sleep_eligible(false);
+}
+
 /// Fetch player status from go-librespot API.
 fn fetch_status(
     state: &Arc<Mutex<AppState>>,
     render_state: &Arc<Mutex<RenderState>>,
     position_threshold_ms: Option<i64>,
+    cmd_tx: Option<&std::sync::mpsc::Sender<InputAction>>,
 ) {
     let url = format!("{API_BASE}/status");
     let body = match ureq::get(&url).call() {
@@ -184,6 +201,18 @@ fn fetch_status(
         return;
     }
 
+    if status.stopped {
+        {
+            let mut st = state.lock().unwrap();
+            clear_spotify_playback_snapshot(&mut st, now);
+        }
+        update_cover(None, render_state);
+        if let Some(tx) = cmd_tx {
+            let _ = tx.send(InputAction::SpotifyDeactivated);
+        }
+        return;
+    }
+
     if let Some(track) = &status.track {
         let cover_url = prefer_high_res_cover_url(&track.album_cover_url);
         {
@@ -202,7 +231,16 @@ fn fetch_status(
     } else {
         let mut st = state.lock().unwrap();
         st.set_connected(!status.username.is_empty());
+        st.set_paused(true);
         st.current_track_uri.clear();
+        st.track_name.clear();
+        st.artist_name.clear();
+        st.album_name.clear();
+        st.set_duration(0);
+        st.set_position(0, now);
+        st.set_stop_to_sleep_eligible(false);
+        drop(st);
+        update_cover(None, render_state);
     }
 }
 
@@ -472,6 +510,7 @@ pub fn poll_status(
     state: Arc<Mutex<AppState>>,
     render_state: Arc<Mutex<RenderState>>,
     quit: Arc<AtomicBool>,
+    cmd_tx: std::sync::mpsc::Sender<InputAction>,
 ) {
     let mut last_sync_at = Instant::now();
 
@@ -501,7 +540,7 @@ pub fn poll_status(
                     let st = state.lock().unwrap();
                     position_correction_threshold(Instant::now(), st.status_sync_boost_until)
                 };
-                fetch_status(&state, &render_state, Some(threshold_ms));
+                fetch_status(&state, &render_state, Some(threshold_ms), Some(&cmd_tx));
                 last_sync_at = Instant::now();
                 continue;
             }
@@ -527,7 +566,7 @@ fn connect_websocket(
     quit: &Arc<AtomicBool>,
     cmd_tx: &std::sync::mpsc::Sender<crate::mode::InputAction>,
 ) {
-    fetch_status(state, render_state, None);
+    fetch_status(state, render_state, None, Some(cmd_tx));
 
     let ws_url = "ws://127.0.0.1:3678/events";
     let (mut socket, _): (WebSocket<MaybeTlsStream<TcpStream>>, _) = match connect(ws_url) {
@@ -587,6 +626,8 @@ fn handle_event(
                         st.set_duration(meta.duration);
                         st.set_position(meta.position, Instant::now());
                         st.set_connected(true);
+                        st.spotify_was_active = true;
+                        st.set_stop_to_sleep_eligible(false);
                         changed
                     };
                     update_cover(Some(&cover_url), render_state);
@@ -603,6 +644,8 @@ fn handle_event(
             if st.mode != crate::mode::AppMode::Local {
                 st.set_paused(false);
                 st.last_pos_time = Instant::now();
+                st.spotify_was_active = true;
+                st.set_stop_to_sleep_eligible(false);
             }
             drop(st);
             let _ = cmd_tx.send(crate::mode::InputAction::SpotifyActivated);
@@ -612,6 +655,7 @@ fn handle_event(
             let mut st = state.lock().unwrap();
             if st.mode != crate::mode::AppMode::Local {
                 st.set_paused(true);
+                st.set_stop_to_sleep_eligible(false);
             }
         }
 
@@ -619,10 +663,7 @@ fn handle_event(
             let is_local = state.lock().unwrap().mode == crate::mode::AppMode::Local;
             if !is_local {
                 let mut st = state.lock().unwrap();
-                st.set_paused(true);
-                st.track_name.clear();
-                st.artist_name.clear();
-                st.set_connected(false);
+                clear_spotify_playback_snapshot(&mut st, Instant::now());
                 drop(st);
                 update_cover(None, render_state);
             }
@@ -653,8 +694,10 @@ fn handle_event(
             {
                 let mut st = state.lock().unwrap();
                 st.set_connected(true);
+                st.spotify_was_active = true;
+                st.set_stop_to_sleep_eligible(false);
             }
-            fetch_status(state, render_state, None);
+            fetch_status(state, render_state, None, Some(cmd_tx));
             let _ = cmd_tx.send(crate::mode::InputAction::SpotifyActivated);
         }
 
@@ -662,10 +705,7 @@ fn handle_event(
             let is_local = state.lock().unwrap().mode == crate::mode::AppMode::Local;
             if !is_local {
                 let mut st = state.lock().unwrap();
-                st.set_connected(false);
-                st.current_track_uri.clear();
-                st.track_name.clear();
-                st.artist_name.clear();
+                clear_spotify_playback_snapshot(&mut st, Instant::now());
                 drop(st);
                 update_cover(None, render_state);
             }
@@ -703,6 +743,12 @@ mod tests {
             img_spotify_off: None,
             img_fav_on: None,
             img_fav_off: None,
+            img_bat0: None,
+            img_bat25: None,
+            img_bat50: None,
+            img_bat75: None,
+            img_bat100: None,
+            img_bat_charging: None,
             requested_cover_url: None,
             applied_cover_url: None,
         }))
@@ -835,6 +881,34 @@ mod tests {
             cmd_rx.try_recv().ok(),
             Some(crate::mode::InputAction::SpotifyActivated)
         );
+    }
+
+    #[test]
+    fn stopped_status_snapshot_clears_stale_track_state() {
+        let mut state = AppState::new();
+        state.current_track_uri = "spotify:track:stale".to_string();
+        state.track_name = "Stale".to_string();
+        state.artist_name = "Artist".to_string();
+        state.album_name = "Album".to_string();
+        state.connected = true;
+        state.paused = false;
+        state.duration = 100_000;
+        state.position = 30_000;
+        state.is_favorited = true;
+        state.render_dirty = false;
+
+        clear_spotify_playback_snapshot(&mut state, Instant::now());
+
+        assert!(!state.connected);
+        assert!(state.paused);
+        assert_eq!(state.current_track_uri, "");
+        assert_eq!(state.track_name, "");
+        assert_eq!(state.artist_name, "");
+        assert_eq!(state.album_name, "");
+        assert_eq!(state.duration, 0);
+        assert_eq!(state.position, 0);
+        assert!(!state.is_favorited);
+        assert!(state.render_dirty);
     }
 
     #[test]

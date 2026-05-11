@@ -39,7 +39,11 @@ fn parse_input_event(buf: &[u8; 24]) -> InputEvent {
 
 /// Read input events from multiple evdev devices.
 pub fn run(state: Arc<Mutex<AppState>>, quit: Arc<AtomicBool>, cmd_tx: Sender<InputAction>) {
-    let paths = ["/dev/input/event3", "/dev/input/event0"];
+    let paths = [
+        "/dev/input/event3",
+        "/dev/input/event1",
+        "/dev/input/event0",
+    ];
     let mut handles = Vec::new();
 
     for path in &paths {
@@ -117,6 +121,10 @@ fn read_input_device(
 
         // Only handle key-down events (value == 1) and D-pad
         if ev.event_type == EV_KEY && ev.value != 1 {
+            continue;
+        }
+
+        if wake_locked_screen_if_needed(&ev, &state, &cmd_tx, &playlist_repeat) {
             continue;
         }
 
@@ -216,6 +224,10 @@ fn handle_normal_input(
 ) {
     if ev.event_type == EV_KEY {
         match ev.code {
+            KEY_POWER => {
+                let _ = cmd_tx.send(InputAction::LockScreen);
+            }
+
             BTN_A => {
                 // Debounce
                 let should_act = {
@@ -309,6 +321,37 @@ fn handle_normal_input(
             }
             _ => {}
         }
+    }
+}
+
+fn wake_locked_screen_if_needed(
+    ev: &InputEvent,
+    state: &Arc<Mutex<AppState>>,
+    cmd_tx: &Sender<InputAction>,
+    repeat_state: &Arc<Mutex<PlaylistRepeatState>>,
+) -> bool {
+    if !is_wake_input(ev) {
+        return false;
+    }
+
+    {
+        let mut st = state.lock().unwrap();
+        if !st.screen_locked {
+            return false;
+        }
+        st.set_screen_locked(false);
+    }
+
+    repeat_state.lock().unwrap().clear();
+    let _ = cmd_tx.send(InputAction::UnlockScreen);
+    true
+}
+
+fn is_wake_input(ev: &InputEvent) -> bool {
+    match ev.event_type {
+        EV_KEY => ev.value == 1,
+        EV_ABS => matches!(ev.code, ABS_HAT0X | ABS_HAT0Y) && ev.value != 0,
+        _ => false,
     }
 }
 
@@ -425,5 +468,71 @@ mod tests {
             repeat.due_action(true, now + Duration::from_millis(400)),
             None
         );
+    }
+
+    #[test]
+    fn power_key_requests_screen_lock() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let quit = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        handle_normal_input(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: KEY_POWER,
+                value: 1,
+            },
+            AppMode::Waiting,
+            &state,
+            &tx,
+            &quit,
+        );
+
+        assert_eq!(rx.try_recv().unwrap(), InputAction::LockScreen);
+    }
+
+    #[test]
+    fn locked_screen_wakes_and_swallows_original_button() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        state.lock().unwrap().screen_locked = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repeat = Arc::new(Mutex::new(PlaylistRepeatState::default()));
+
+        assert!(wake_locked_screen_if_needed(
+            &InputEvent {
+                event_type: EV_KEY,
+                code: BTN_A,
+                value: 1,
+            },
+            &state,
+            &tx,
+            &repeat,
+        ));
+
+        assert!(!state.lock().unwrap().screen_locked);
+        assert_eq!(rx.try_recv().unwrap(), InputAction::UnlockScreen);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn locked_screen_wakes_from_directional_input() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        state.lock().unwrap().screen_locked = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repeat = Arc::new(Mutex::new(PlaylistRepeatState::default()));
+
+        assert!(wake_locked_screen_if_needed(
+            &InputEvent {
+                event_type: EV_ABS,
+                code: ABS_HAT0X,
+                value: 1,
+            },
+            &state,
+            &tx,
+            &repeat,
+        ));
+
+        assert!(!state.lock().unwrap().screen_locked);
+        assert_eq!(rx.try_recv().unwrap(), InputAction::UnlockScreen);
     }
 }

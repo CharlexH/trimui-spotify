@@ -391,17 +391,7 @@ fn draw_circle_outline(buf: &mut [u8], cx: i32, cy: i32, r: i32, red: u8, g: u8,
 }
 
 /// Draw a pie/fan shape from 12-o'clock clockwise, filled to `progress` (0.0..1.0).
-fn draw_pie(
-    buf: &mut [u8],
-    cx: i32,
-    cy: i32,
-    r: i32,
-    progress: f32,
-    red: u8,
-    g: u8,
-    b: u8,
-    a: u8,
-) {
+fn draw_pie(buf: &mut [u8], cx: i32, cy: i32, r: i32, progress: f32, red: u8, g: u8, b: u8, a: u8) {
     if progress <= 0.0 {
         return;
     }

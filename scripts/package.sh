@@ -45,6 +45,12 @@ copy_resource_tree() {
     tapeBase.png \
     pause.png \
     fav_off.png \
+    bat0.png \
+    bat25.png \
+    bat50.png \
+    bat75.png \
+    bat100.png \
+    bat_charging.png \
     wheel.png \
     cover_mask.png \
     spotify_off.png \
@@ -147,6 +153,12 @@ validate_zip_layout() {
   assert_zip_entry "$zip_path" "${root}data/config.yml"
   assert_zip_entry "$zip_path" "${root}resources/tapeBase.png"
   assert_zip_entry "$zip_path" "${root}resources/font_mono.ttf"
+  assert_zip_entry "$zip_path" "${root}resources/bat0.png"
+  assert_zip_entry "$zip_path" "${root}resources/bat25.png"
+  assert_zip_entry "$zip_path" "${root}resources/bat50.png"
+  assert_zip_entry "$zip_path" "${root}resources/bat75.png"
+  assert_zip_entry "$zip_path" "${root}resources/bat100.png"
+  assert_zip_entry "$zip_path" "${root}resources/bat_charging.png"
   assert_zip_entry "$zip_path" "${root}LICENSES/NOTICE.md"
   assert_zip_entry "$zip_path" "${root}LICENSES/THIRD_PARTY_SOURCES.md"
   assert_zip_no_entry "$zip_path" "${root}resources/Fullscreen - Mesh Grid.png"
@@ -180,6 +192,7 @@ validate_release_packages() {
   echo "OK: release zip layouts match pak store and manual install expectations"
 }
 
+require_command zip
 require_command zipinfo
 require_file "$package_source/go-librespot"
 require_file "$package_source/yt-dlp"

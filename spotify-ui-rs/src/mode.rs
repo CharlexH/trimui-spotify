@@ -35,6 +35,8 @@ pub enum InputAction {
     SpotifyActivated,
     SpotifyDeactivated,
     SpotifyTrackChanged,
+    LockScreen,
+    UnlockScreen,
     RequestExit,
     ExitApp,
 }

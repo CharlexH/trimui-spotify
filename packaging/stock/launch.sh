@@ -19,6 +19,8 @@ echo 1 > /tmp/stay_alive
 killall go-librespot 2>/dev/null
 killall sideb 2>/dev/null
 sleep 1
+echo 1 > /tmp/stay_awake
+echo 1 > /tmp/stay_alive
 
 cp "$progdir/go-librespot" /tmp/go-librespot
 cp "$progdir/sideb" /tmp/sideb

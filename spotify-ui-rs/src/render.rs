@@ -28,6 +28,28 @@ struct FramePlan {
     sleep: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusBarLayout {
+    time_x: i32,
+    play_icon_x: i32,
+    center_left: i32,
+    center_right: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatteryIconLevel {
+    Empty,
+    Quarter,
+    Half,
+    ThreeQuarter,
+    Full,
+    Charging,
+}
+
+pub(crate) const STATUS_BAR_DIRTY_RECT: (usize, usize, usize, usize) = (0, 620, SCREEN_W, 690);
+const STATUS_BAR_RIGHT_MARGIN: i32 = 28;
+const STATUS_BAR_GAP: i32 = 18;
+
 #[derive(Debug)]
 struct AnimationMode {
     target_fps: u64,
@@ -191,6 +213,75 @@ fn centered_text_x(screen_width: i32, text_width: i32) -> i32 {
     ((screen_width - text_width).max(0)) / 2
 }
 
+fn centered_text_x_in_bounds(left: i32, right: i32, text_width: i32) -> i32 {
+    let available = (right - left).max(0);
+    left + ((available - text_width).max(0)) / 2
+}
+
+fn battery_icon_level(percent: Option<u8>, charging: bool) -> Option<BatteryIconLevel> {
+    if charging {
+        return Some(BatteryIconLevel::Charging);
+    }
+
+    match percent? {
+        80..=100 => Some(BatteryIconLevel::Full),
+        60..=79 => Some(BatteryIconLevel::ThreeQuarter),
+        40..=59 => Some(BatteryIconLevel::Half),
+        20..=39 => Some(BatteryIconLevel::Quarter),
+        _ => Some(BatteryIconLevel::Empty),
+    }
+}
+
+fn draw_battery_status_icon(buf: &mut [u8], rs: &RenderState, percent: Option<u8>, charging: bool) {
+    let Some(level) = battery_icon_level(percent, charging) else {
+        return;
+    };
+    if let Some(img) = rs.battery_icon(level) {
+        drawing::draw_image_alpha(buf, img, BATTERY_ICON_X, BAR_ICON_Y);
+    }
+}
+
+fn status_bar_layout(screen_width: i32, time_width: i32) -> StatusBarLayout {
+    let right_edge = screen_width - STATUS_BAR_RIGHT_MARGIN;
+    let time_x = right_edge - time_width;
+    let play_icon_x = time_x - PLAY_ICON_MARGIN - BAR_ICON_SIZE;
+
+    StatusBarLayout {
+        time_x,
+        play_icon_x,
+        center_left: FAV_ICON_X + BAR_ICON_SIZE + STATUS_BAR_GAP,
+        center_right: play_icon_x - STATUS_BAR_GAP,
+    }
+}
+
+fn format_track_info_to_width<F>(
+    track_name: &str,
+    artist_name: &str,
+    max_chars: usize,
+    max_width: i32,
+    measure: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> i32,
+{
+    if max_width <= 0 {
+        return None;
+    }
+
+    for chars in (1..=max_chars).rev() {
+        let text = format_track_info(track_name, artist_name, chars)?;
+        if measure(&text) <= max_width {
+            return Some(text);
+        }
+    }
+
+    None
+}
+
+fn dirty_rect_i32(rect: (usize, usize, usize, usize)) -> (i32, i32, i32, i32) {
+    (rect.0 as i32, rect.1 as i32, rect.2 as i32, rect.3 as i32)
+}
+
 fn playback_footer_labels() -> [&'static str; 6] {
     [
         "PREV/NEXT (←/→)",
@@ -351,6 +442,12 @@ pub struct RenderState {
     pub img_spotify_off: Option<RgbaImage>,
     pub img_fav_on: Option<RgbaImage>,
     pub img_fav_off: Option<RgbaImage>,
+    pub img_bat0: Option<RgbaImage>,
+    pub img_bat25: Option<RgbaImage>,
+    pub img_bat50: Option<RgbaImage>,
+    pub img_bat75: Option<RgbaImage>,
+    pub img_bat100: Option<RgbaImage>,
+    pub img_bat_charging: Option<RgbaImage>,
     pub requested_cover_url: Option<String>,
     pub applied_cover_url: Option<String>,
 }
@@ -369,6 +466,12 @@ impl RenderState {
         img_spotify_off: Option<RgbaImage>,
         img_fav_on: Option<RgbaImage>,
         img_fav_off: Option<RgbaImage>,
+        img_bat0: Option<RgbaImage>,
+        img_bat25: Option<RgbaImage>,
+        img_bat50: Option<RgbaImage>,
+        img_bat75: Option<RgbaImage>,
+        img_bat100: Option<RgbaImage>,
+        img_bat_charging: Option<RgbaImage>,
         fonts: &FontSet,
     ) -> Self {
         let overlay_window = image_ops::build_overlay_window(tape_a);
@@ -392,6 +495,12 @@ impl RenderState {
             img_spotify_off,
             img_fav_on,
             img_fav_off,
+            img_bat0,
+            img_bat25,
+            img_bat50,
+            img_bat75,
+            img_bat100,
+            img_bat_charging,
             requested_cover_url: None,
             applied_cover_url: None,
         };
@@ -400,6 +509,17 @@ impl RenderState {
         rs.rebuild_playing_scene_locked(None);
         rs.rebuild_waiting_scene(fonts);
         rs
+    }
+
+    fn battery_icon(&self, level: BatteryIconLevel) -> Option<&RgbaImage> {
+        match level {
+            BatteryIconLevel::Empty => self.img_bat0.as_ref(),
+            BatteryIconLevel::Quarter => self.img_bat25.as_ref(),
+            BatteryIconLevel::Half => self.img_bat50.as_ref(),
+            BatteryIconLevel::ThreeQuarter => self.img_bat75.as_ref(),
+            BatteryIconLevel::Full => self.img_bat100.as_ref(),
+            BatteryIconLevel::Charging => self.img_bat_charging.as_ref(),
+        }
     }
 
     /// Draw the base scene (hint labels at bottom).
@@ -543,9 +663,9 @@ pub fn render(
 
     // Dirty rects
     let dirty_rects: [(i32, i32, i32, i32); 3] = [
-        (88, 64, 536, 520),             // left roll
-        (488, 64, 936, 520),            // right roll
-        (0, 620, SCREEN_W as i32, 690), // info bar
+        (88, 64, 536, 520),                    // left roll
+        (488, 64, 936, 520),                   // right roll
+        dirty_rect_i32(STATUS_BAR_DIRTY_RECT), // info bar
     ];
 
     if render_state.full_redraw {
@@ -632,6 +752,7 @@ pub fn render_loop(
     let mut animation_mode = AnimationMode::new();
     let mut last_wheel_frame: usize = usize::MAX; // track last rendered wheel frame
     let mut last_position: i64 = -1; // track last rendered position for time display
+    let mut last_screen_locked = false;
 
     loop {
         if quit.load(Ordering::Relaxed) {
@@ -642,13 +763,14 @@ pub fn render_loop(
         let dt = now.duration_since(last_frame);
         last_frame = now;
 
-        let (mode, paused, dirty, playlist_visible);
+        let (mode, paused, dirty, playlist_visible, screen_locked);
         {
             let mut st = app_state.lock().unwrap();
             mode = st.mode;
             paused = st.paused;
             dirty = st.render_dirty || st.confirmation.is_some();
             playlist_visible = st.playlist_visible;
+            screen_locked = st.screen_locked;
 
             // Animate wheels when playing (Spotify or Local)
             let playing = match mode {
@@ -672,6 +794,21 @@ pub fn render_loop(
                 }
                 st.last_pos_time = now;
             }
+        }
+
+        if screen_locked {
+            if dirty || !last_screen_locked {
+                back_buf.fill(0);
+                fb.swap_buffers(back_buf);
+                app_state.lock().unwrap().render_dirty = false;
+            }
+            last_screen_locked = true;
+            animation_mode.reset(now);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        } else if last_screen_locked {
+            render_state.lock().unwrap().full_redraw = true;
+            last_screen_locked = false;
         }
 
         // For scene mode sync, treat Local as connected (shows playing scene)
@@ -715,8 +852,18 @@ pub fn render_loop(
                 {
                     let mut st = app_state.lock().unwrap();
                     if let Some(msg) = st.active_confirmation_message(std::time::Instant::now()) {
-                        // Clear the status bar area (620–690), preserve "EXIT [B]" hint at 736
-                        drawing::fill_rect(back_buf, 0, 620, SCREEN_W as i32, 70, 0, 0, 0, 255);
+                        let status_rect = STATUS_BAR_DIRTY_RECT;
+                        drawing::fill_rect(
+                            back_buf,
+                            status_rect.0 as i32,
+                            status_rect.1 as i32,
+                            (status_rect.2 - status_rect.0) as i32,
+                            (status_rect.3 - status_rect.1) as i32,
+                            0,
+                            0,
+                            0,
+                            255,
+                        );
                         let msg_w = fonts.measure_text(msg, fonts.scale_large);
                         let msg_x = centered_text_x(SCREEN_W as i32, msg_w);
                         fonts.draw_text(
@@ -728,6 +875,13 @@ pub fn render_loop(
                             200,
                             200,
                             fonts.scale_large,
+                        );
+                    } else {
+                        draw_battery_status_icon(
+                            back_buf,
+                            &rs,
+                            st.battery_percent,
+                            st.battery_charging,
                         );
                     }
                 }
@@ -769,7 +923,14 @@ pub fn render_loop(
                         fonts.scale_large,
                     );
                 } else {
-                    // Left side: Spotify connection icon
+                    // Left side: battery, Spotify connection, favorite.
+                    draw_battery_status_icon(
+                        back_buf,
+                        &rs,
+                        st.battery_percent,
+                        st.battery_charging,
+                    );
+
                     let spotify_icon = if st.connected {
                         &rs.img_spotify_on
                     } else {
@@ -779,7 +940,6 @@ pub fn render_loop(
                         drawing::draw_image_alpha(back_buf, img, SPOTIFY_ICON_X, BAR_ICON_Y);
                     }
 
-                    // Left side: favorite icon
                     if !st.current_track_uri.is_empty() {
                         let fav_icon = if st.is_favorited {
                             &rs.img_fav_on
@@ -794,11 +954,11 @@ pub fn render_loop(
                     // Right side: time remaining
                     let time_remaining = animation::format_duration(st.duration - st.position);
                     let tr_w = fonts.measure_text(&time_remaining, fonts.scale_large);
-                    let time_x = SCREEN_W as i32 - 28 - tr_w;
+                    let layout = status_bar_layout(SCREEN_W as i32, tr_w);
                     fonts.draw_text(
                         back_buf,
                         &time_remaining,
-                        time_x,
+                        layout.time_x,
                         STATUS_BASELINE_Y,
                         255,
                         255,
@@ -813,15 +973,24 @@ pub fn render_loop(
                         &rs.img_playing
                     };
                     if let Some(img) = play_icon {
-                        let icon_x = time_x - PLAY_ICON_MARGIN - BAR_ICON_SIZE;
-                        drawing::draw_image_alpha(back_buf, img, icon_x, BAR_ICON_Y);
+                        drawing::draw_image_alpha(back_buf, img, layout.play_icon_x, BAR_ICON_Y);
                     }
 
                     // Center: track info
-                    if let Some(info_text) = format_track_info(&st.track_name, &st.artist_name, 30)
-                    {
+                    let max_info_width = layout.center_right - layout.center_left;
+                    if let Some(info_text) = format_track_info_to_width(
+                        &st.track_name,
+                        &st.artist_name,
+                        30,
+                        max_info_width,
+                        |text| fonts.measure_text(text, fonts.scale_large),
+                    ) {
                         let info_w = fonts.measure_text(&info_text, fonts.scale_large);
-                        let info_x = centered_text_x(SCREEN_W as i32, info_w);
+                        let info_x = centered_text_x_in_bounds(
+                            layout.center_left,
+                            layout.center_right,
+                            info_w,
+                        );
                         fonts.draw_text(
                             back_buf,
                             &info_text,
@@ -855,11 +1024,12 @@ pub fn render_loop(
                 // Only write dirty rects if animation or time display actually changed
                 let position_sec = cur_position / 1000;
                 let last_position_sec = last_position / 1000;
-                if cur_wheel_frame != last_wheel_frame || position_sec != last_position_sec || dirty {
+                if cur_wheel_frame != last_wheel_frame || position_sec != last_position_sec || dirty
+                {
                     let dirty_rects: [(usize, usize, usize, usize); 3] = [
                         (88, 64, 536, 520),
                         (488, 64, 936, 520),
-                        (0, 620, SCREEN_W, 690),
+                        STATUS_BAR_DIRTY_RECT,
                     ];
                     for (x1, y1, x2, y2) in dirty_rects {
                         fb.copy_rect(back_buf, x1, y1, x2, y2);
@@ -942,6 +1112,12 @@ mod tests {
             img_spotify_off: None,
             img_fav_on: None,
             img_fav_off: None,
+            img_bat0: None,
+            img_bat25: None,
+            img_bat50: None,
+            img_bat75: None,
+            img_bat100: None,
+            img_bat_charging: None,
             requested_cover_url: None,
             applied_cover_url: None,
         }
@@ -965,6 +1141,13 @@ mod tests {
     }
 
     #[test]
+    fn dirty_paused_playback_frame_still_renders() {
+        let plan = frame_plan(true, true, true, false, BASE_ANIM_FPS);
+        assert!(plan.should_render);
+        assert_eq!(plan.sleep, Duration::from_millis(100));
+    }
+
+    #[test]
     fn track_info_is_combined_without_truncation_when_short_enough() {
         assert_eq!(
             format_track_info("239", "perquel", 30).as_deref(),
@@ -976,6 +1159,97 @@ mod tests {
     fn centered_text_x_uses_full_screen_width() {
         assert_eq!(centered_text_x(1024, 200), 412);
         assert_eq!(centered_text_x(1024, 1024), 0);
+    }
+
+    #[test]
+    fn battery_icon_level_uses_charging_and_five_equal_percent_bands() {
+        assert_eq!(
+            battery_icon_level(Some(50), true),
+            Some(BatteryIconLevel::Charging)
+        );
+        assert_eq!(
+            battery_icon_level(None, true),
+            Some(BatteryIconLevel::Charging)
+        );
+        assert_eq!(battery_icon_level(None, false), None);
+        assert_eq!(
+            battery_icon_level(Some(100), false),
+            Some(BatteryIconLevel::Full)
+        );
+        assert_eq!(
+            battery_icon_level(Some(80), false),
+            Some(BatteryIconLevel::Full)
+        );
+        assert_eq!(
+            battery_icon_level(Some(79), false),
+            Some(BatteryIconLevel::ThreeQuarter)
+        );
+        assert_eq!(
+            battery_icon_level(Some(60), false),
+            Some(BatteryIconLevel::ThreeQuarter)
+        );
+        assert_eq!(
+            battery_icon_level(Some(59), false),
+            Some(BatteryIconLevel::Half)
+        );
+        assert_eq!(
+            battery_icon_level(Some(40), false),
+            Some(BatteryIconLevel::Half)
+        );
+        assert_eq!(
+            battery_icon_level(Some(39), false),
+            Some(BatteryIconLevel::Quarter)
+        );
+        assert_eq!(
+            battery_icon_level(Some(20), false),
+            Some(BatteryIconLevel::Quarter)
+        );
+        assert_eq!(
+            battery_icon_level(Some(19), false),
+            Some(BatteryIconLevel::Empty)
+        );
+        assert_eq!(
+            battery_icon_level(Some(0), false),
+            Some(BatteryIconLevel::Empty)
+        );
+    }
+
+    #[test]
+    fn status_bar_layout_orders_left_icons_battery_spotify_favorite() {
+        let time_width = 74;
+        let layout = status_bar_layout(SCREEN_W as i32, time_width);
+
+        assert_eq!(BATTERY_ICON_X, 20);
+        assert_eq!(SPOTIFY_ICON_X, BATTERY_ICON_X + BAR_ICON_SIZE + 16);
+        assert_eq!(FAV_ICON_X, SPOTIFY_ICON_X + BAR_ICON_SIZE + 16);
+        assert_eq!(
+            layout.center_left,
+            FAV_ICON_X + BAR_ICON_SIZE + STATUS_BAR_GAP
+        );
+        assert!(layout.play_icon_x + BAR_ICON_SIZE + PLAY_ICON_MARGIN <= layout.time_x);
+        assert_eq!(
+            layout.time_x + time_width,
+            SCREEN_W as i32 - STATUS_BAR_RIGHT_MARGIN
+        );
+        assert!(layout.center_right <= layout.play_icon_x - STATUS_BAR_GAP);
+        assert!(STATUS_BASELINE_Y as usize >= STATUS_BAR_DIRTY_RECT.1);
+        assert!(STATUS_BASELINE_Y as usize <= STATUS_BAR_DIRTY_RECT.3);
+    }
+
+    #[test]
+    fn bundled_battery_pngs_are_loaded_as_status_icons() {
+        for name in [
+            "bat0.png",
+            "bat25.png",
+            "bat50.png",
+            "bat75.png",
+            "bat100.png",
+            "bat_charging.png",
+        ] {
+            let img = crate::resources::load_image_resource(name).expect("battery icon loads");
+            assert_eq!(img.width, BAR_ICON_SIZE as u32, "{name} width");
+            assert_eq!(img.height, BAR_ICON_SIZE as u32, "{name} height");
+        }
     }
 
     #[test]
