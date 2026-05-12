@@ -59,28 +59,7 @@ pub fn scan_once(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
     let _ = fs::create_dir_all(&imports_dir);
     let _ = fs::create_dir_all(&music_dir);
 
-    let entries = match fs::read_dir(&imports_dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            eprintln!("import: read_dir failed for {}: {e}", imports_dir.display());
-            return 0;
-        }
-    };
-
-    let mut import_candidates = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_mp3 = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("mp3"))
-            .unwrap_or(false);
-        if !is_mp3 {
-            continue;
-        }
-
-        import_candidates.push(path);
-    }
+    let import_candidates = collect_import_candidates(&imports_dir);
 
     if !import_candidates.is_empty() {
         eprintln!(
@@ -104,6 +83,47 @@ pub fn scan_once(favorites: &Arc<Mutex<FavoritesManager>>) -> usize {
     }
 
     imported
+}
+
+fn collect_import_candidates(imports_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    collect_import_candidates_into(imports_dir, &mut candidates);
+    candidates.sort();
+    candidates
+}
+
+fn collect_import_candidates_into(dir: &Path, candidates: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("import: read_dir failed for {}: {e}", dir.display());
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(e) => {
+                eprintln!("import: file_type failed for {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        if file_type.is_dir() {
+            collect_import_candidates_into(&path, candidates);
+        } else if file_type.is_file() && is_mp3_path(&path) {
+            candidates.push(path);
+        }
+    }
+}
+
+fn is_mp3_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("mp3"))
+        .unwrap_or(false)
 }
 
 pub fn run(
@@ -434,6 +454,43 @@ mod tests {
         assert_eq!(
             next.file_name().and_then(|name| name.to_str()),
             Some("Artist - Song (2).mp3")
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn import_candidates_include_nested_mp3_files() {
+        let base = std::env::temp_dir().join(format!(
+            "sideb-import-recursive-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let disc_one = base.join("Disc 1");
+        let deep = base.join("Disc 2").join("Deep");
+        fs::create_dir_all(&disc_one).unwrap();
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(base.join("Root.mp3"), b"mp3").unwrap();
+        fs::write(disc_one.join("Nested.mp3"), b"mp3").unwrap();
+        fs::write(deep.join("Upper.MP3"), b"mp3").unwrap();
+        fs::write(deep.join("notes.txt"), b"text").unwrap();
+
+        let candidates = collect_import_candidates(&base);
+        let relative: Vec<String> = candidates
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert_eq!(
+            relative,
+            vec!["Disc 1/Nested.mp3", "Disc 2/Deep/Upper.MP3", "Root.mp3"]
         );
 
         let _ = fs::remove_dir_all(&base);

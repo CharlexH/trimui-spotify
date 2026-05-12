@@ -2,11 +2,11 @@
 
 SideB is a retro cassette-style music player for [TrimUI Brick](https://trimui.com) with Spotify Connect, offline favorites, and local MP3 playback.
 
-Latest release: `v1.0.8`
+Latest release: `v1.0.9`
 
-- Added a compact battery icon to the status bar with level and charging states
-- Added SideB Lock, which turns the screen off and pauses active playback
-- Improved playback-aware sleep handling so SideB avoids suspending while playback or downloads are active
+- Local MP3 import now scans subfolders under `data/imports/`
+- Nested album folders are imported into `FAV LIST` automatically
+- Existing import collision handling still preserves duplicate filenames safely
 
 ## Screenshots 📸
 
@@ -115,7 +115,7 @@ This software is provided as-is for educational and personal use. It is not inte
 
 ### Local uploads
 
-Copy `.mp3` files into the `data/imports/` folder inside the app directory:
+Copy `.mp3` files into the `data/imports/` folder inside the app directory, either directly or inside subfolders:
 
 ```text
 NextUI   -> /mnt/SDCARD/Tools/tg5040/SideB.pak/data/imports/
@@ -123,7 +123,7 @@ Stock    -> /mnt/SDCARD/Apps/SideB/data/imports/
 CrossMix -> /mnt/SDCARD/Apps/SideB/data/imports/
 ```
 
-SideB scans that folder automatically at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks.
+SideB scans that folder recursively at startup and while running. Imported files are moved into `data/music/`, then added to `FAV LIST` and treated like downloaded local tracks.
 
 Notes:
 
@@ -218,7 +218,7 @@ Public releases attach three installable archives:
 
 The NextUI Pak Store consumes the `nextui` archive via [`pak.json`](pak.json).
 
-Current release tag: `v1.0.8`
+Current release tag: `v1.0.9`
 
 ## Repo Layout 🗂️
 

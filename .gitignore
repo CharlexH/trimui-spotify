@@ -21,6 +21,7 @@ package/SideB.pak/ffmpeg-lite
 # Large resource files (see README for download instructions)
 package/SideB.pak/resources/font.ttf
 package/SideB.pak/resources/ca-certificates.crt
+package/SideB.pak/resources/Fullscreen - Mesh Grid.png
 
 # Build artifacts
 *.exe
